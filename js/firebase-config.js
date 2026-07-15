@@ -1,0 +1,23 @@
+/*
+  STEP 1 OF SETUP — paste your own Firebase project credentials below.
+  See README.md → "Firebase setup" for exact click-by-click steps.
+  These values are safe to be public in a client-side app; access is
+  controlled by the Firestore Security Rules you set in the Firebase
+  console, not by hiding this file.
+*/
+const firebaseConfig = {
+  apiKey: "AIzaSyAa7gZdeObWjHOFnpt9SsVke-1FgeP59dQ",
+  authDomain: "us-prime-prep-deck.firebaseapp.com",
+  projectId: "us-prime-prep-deck",
+  storageBucket: "us-prime-prep-deck.firebasestorage.app",
+  messagingSenderId: "63453693635",
+  appId: "1:63453693635:web:6affa2d0ac2f0f0844c476"
+};
+
+/*
+  STEP 2 - set a shared access code your three teams will type in to enter
+  the app. This is a light front-door, not real security (anyone with the
+  code and a link can get in) - enough to keep the tool off random visitors'
+  radar. For real per-person accounts, see README.md -> "Optional: real logins".
+*/
+const ACCESS_CODE = "USPI_whTX@26";
