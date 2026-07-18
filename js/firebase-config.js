@@ -15,9 +15,4 @@ const firebaseConfig = {
 };
 
 /*
-  STEP 2 - set a shared access code your three teams will type in to enter
-  the app. This is a light front-door, not real security (anyone with the
-  code and a link can get in) - enough to keep the tool off random visitors'
-  radar. For real per-person accounts, see README.md -> "Optional: real logins".
-*/
-const ACCESS_CODE = "USPI_whTX@26";
+
