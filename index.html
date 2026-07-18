@@ -14,28 +14,23 @@
     <div class="mark">PREP DECK</div>
     <div class="sub">Warehouse &amp; Fulfilment Tracker</div>
     <div class="field">
-      <label>Your name</label>
-      <input type="text" id="gate-name" placeholder="e.g. Sarah K.">
+      <label>Email</label>
+      <input type="email" id="gate-email" placeholder="you@company.com" autocomplete="username">
     </div>
     <div class="field">
-      <label>Your team</label>
-      <select id="gate-team">
-        <option value="Order Intake">Order Intake (labels &amp; order data)</option>
-        <option value="Transactions">Transactions &amp; Client Comms</option>
-        <option value="Warehouse">Warehouse (prep, pack, ship, storage)</option>
-        <option value="Admin">Admin / Owner</option>
-      </select>
+      <label>Password</label>
+      <input type="password" id="gate-password" placeholder="Your password" autocomplete="current-password">
     </div>
-    <div class="field">
-      <label>Shared access code</label>
-      <input type="password" id="gate-code" placeholder="Ask your admin">
-    </div>
-    <button class="btn-primary" id="gate-submit" style="justify-content:center;">Enter Prep Deck</button>
+    <button class="btn-primary" id="gate-submit" style="justify-content:center;">Sign In</button>
     <div id="gate-error" style="color:#C1443C;font-size:12px;margin-top:10px;"></div>
+    <div style="font-size:11.5px;color:var(--text-dim);margin-top:16px;line-height:1.5;">
+      No account yet? Ask your admin to set you up — see the README's
+      "Setting up your team" section.
+    </div>
   </div>
 </div>
 
-<!-- APP -->
+<!-- APP (only ever shown once signed in) -->
 <div id="app" style="display:none;">
   <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
   <div class="sidebar" id="sidebar">
@@ -51,12 +46,16 @@
       <button class="nav-btn" data-view="storage"><span class="ico">🗄️</span>Storage / Inventory</button>
       <button class="nav-btn" data-view="comms"><span class="ico">💬</span>Comms &amp; Issues</button>
       <button class="nav-btn" data-view="reports"><span class="ico">📤</span>Reports / Export</button>
+      <button class="nav-btn" data-view="admin" id="nav-admin" style="display:none;"><span class="ico">🛡️</span>Admin / Team</button>
     </nav>
     <div class="sidebar-user">
       <div class="conn-status" id="conn-status"><span class="conn-dot"></span>Live sync</div>
       <div class="who" id="who-name">—</div>
       <div class="team" id="who-team">—</div>
-      <button id="switch-user">Switch user</button>
+      <div class="user-btn-row">
+        <button id="switch-user">Switch user</button>
+        <button id="log-out">Log out</button>
+      </div>
     </div>
   </div>
 
@@ -66,7 +65,7 @@
       <h1 id="view-title">Dashboard</h1>
       <div class="search-wrap">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="global-search" placeholder="Search order ref, delivery location, or tracking #">
+        <input type="text" id="global-search" placeholder="Search order ref, delivery location, or tracking">
       </div>
       <button class="btn-primary btn-accent" id="open-new-order"><span class="btn-full-label">+ New Order</span><span class="btn-short-label">+</span></button>
     </div>
@@ -215,12 +214,41 @@
         </div>
       </div>
 
+      <!-- ADMIN / TEAM MEMBERS -->
+      <div class="view" id="view-admin">
+        <div class="section-title" style="margin-top:0;">Team members</div>
+        <p style="font-size:12.5px;color:var(--text-dim);max-width:640px;margin-bottom:14px;">
+          Adding someone here gives them a name and a team inside Prep Deck, but it does
+          <b>not</b> create their login. You still need to create their email + password
+          once in the Firebase console first — see the README's "Setting up your team."
+          Use the exact same email (lowercase) in both places.
+        </p>
+        <div class="table-card" style="padding:18px;margin-bottom:20px;">
+          <div class="form-grid">
+            <div class="field"><label>Email (must match their Firebase login exactly)</label><input type="email" id="tm-email" placeholder="name@company.com"></div>
+            <div class="field"><label>Name</label><input type="text" id="tm-name" placeholder="Full name"></div>
+            <div class="field"><label>Team</label>
+              <select id="tm-team"><option>Order Intake</option><option>Warehouse</option><option>Transactions</option><option>Admin</option></select>
+            </div>
+          </div>
+          <button class="btn-primary btn-accent" id="tm-submit" style="margin-top:14px;">Save Team Member</button>
+          <div id="tm-error" style="color:#C1443C;font-size:12px;margin-top:8px;"></div>
+        </div>
+        <div class="table-card">
+          <table class="responsive-table">
+            <thead><tr><th>Email</th><th>Name</th><th>Team</th><th></th></tr></thead>
+            <tbody id="tm-body"></tbody>
+          </table>
+        </div>
+      </div>
+
     </div>
   </div>
-</div>
 
-<!-- FLOATING ACTION BUTTON (mobile) -->
-<button class="fab" id="fab-new-order" aria-label="New Order">+</button>
+  <!-- FLOATING ACTION BUTTON (mobile) — lives inside #app so it's only ever
+       rendered once the user is authenticated, never on the login screen -->
+  <button class="fab" id="fab-new-order" aria-label="New Order">+</button>
+</div>
 
 <!-- NEW ORDER MODAL -->
 <div class="overlay" id="modal-new">
@@ -284,6 +312,7 @@
 
       <div class="section-title" style="font-size:14px;">Warehouse &amp; shipping actions</div>
       <div class="action-row" id="dt-actions"></div>
+      <div id="dt-actions-note" style="font-size:11.5px;color:var(--text-dim);display:none;margin:-6px 0 14px;">Your team doesn't have permission to change this order's status. Notes are always open to everyone.</div>
 
       <div class="section-title" style="font-size:14px;">Notes, WhatsApp log &amp; issue flags</div>
       <div class="form-grid full">
