@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Prep Deck — Order &amp; Fulfilment Tracker</title>
 <link rel="stylesheet" href="css/style.css">
 </head>
@@ -22,7 +22,7 @@
       <select id="gate-team">
         <option value="Order Intake">Order Intake (labels &amp; order data)</option>
         <option value="Transactions">Transactions &amp; Client Comms</option>
-        <option value="Warehouse">Warehouse (prep, pack, ship)</option>
+        <option value="Warehouse">Warehouse (prep, pack, ship, storage)</option>
         <option value="Admin">Admin / Owner</option>
       </select>
     </div>
@@ -37,17 +37,20 @@
 
 <!-- APP -->
 <div id="app" style="display:none;">
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
   <div class="sidebar" id="sidebar">
     <div class="sidebar-brand">
       <div class="mark">PREP DECK</div>
       <div class="sub">Fulfilment Control</div>
+      <button class="sidebar-close" id="sidebar-close">✕</button>
     </div>
     <nav class="sidebar-nav">
-      <button class="nav-btn active" data-view="dashboard">📊 Dashboard</button>
-      <button class="nav-btn" data-view="orders">📦 All Orders</button>
-      <button class="nav-btn" data-view="warehouse">🏷️ Warehouse Queue</button>
-      <button class="nav-btn" data-view="comms">💬 Comms &amp; Issues</button>
-      <button class="nav-btn" data-view="reports">📤 Reports / Export</button>
+      <button class="nav-btn active" data-view="dashboard"><span class="ico">📊</span>Dashboard</button>
+      <button class="nav-btn" data-view="orders"><span class="ico">📦</span>All Orders</button>
+      <button class="nav-btn" data-view="warehouse"><span class="ico">🏷️</span>Warehouse Queue</button>
+      <button class="nav-btn" data-view="storage"><span class="ico">🗄️</span>Storage / Inventory</button>
+      <button class="nav-btn" data-view="comms"><span class="ico">💬</span>Comms &amp; Issues</button>
+      <button class="nav-btn" data-view="reports"><span class="ico">📤</span>Reports / Export</button>
     </nav>
     <div class="sidebar-user">
       <div class="conn-status" id="conn-status"><span class="conn-dot"></span>Live sync</div>
@@ -59,12 +62,13 @@
 
   <div class="main">
     <div class="topbar">
+      <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
       <h1 id="view-title">Dashboard</h1>
       <div class="search-wrap">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="global-search" placeholder="Search order ref, marketplace ID, or USPS tracking #">
+        <input type="text" id="global-search" placeholder="Search order ref, delivery location, or tracking #">
       </div>
-      <button class="btn-primary btn-accent" id="open-new-order">+ New Order</button>
+      <button class="btn-primary btn-accent" id="open-new-order"><span class="btn-full-label">+ New Order</span><span class="btn-short-label">+</span></button>
     </div>
 
     <div class="content">
@@ -84,6 +88,13 @@
         <div class="section-title">Marketplace mix — last 30 days</div>
         <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);" id="market-mix"></div>
 
+        <div class="section-title">Storage snapshot</div>
+        <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);">
+          <div class="stat-card c-received"><div class="num" id="stat-storage-clients">0</div><div class="lbl">Clients Storing Stock</div></div>
+          <div class="stat-card c-packed"><div class="num" id="stat-storage-cartons">0</div><div class="lbl">Cartons In Storage</div></div>
+          <div class="stat-card c-shipped"><div class="num" id="stat-storage-batches">0</div><div class="lbl">Active Stock Batches</div></div>
+        </div>
+
         <div class="section-title">Needs attention right now</div>
         <div class="table-card">
           <table>
@@ -96,17 +107,21 @@
       <!-- ORDERS -->
       <div class="view" id="view-orders">
         <div class="filters">
-          <select id="f-marketplace"><option value="">All marketplaces</option><option>Amazon FBM</option><option>Etsy Dropship</option><option>eBay Dropship</option></select>
+          <select id="f-marketplace">
+            <option value="">All marketplaces</option>
+            <option>Amazon FBM</option><option>Etsy Dropship</option><option>eBay Dropship</option>
+            <option>Walmart Dropship</option><option>Shopify Dropship</option><option>TikTok Shop</option><option>Other</option>
+          </select>
           <select id="f-status"><option value="">All statuses</option><option>Order Received</option><option>Label Acknowledged</option><option>Packed</option><option>Shipped</option><option>Delivered</option><option>Exception</option></select>
           <input type="date" id="f-date">
           <span class="spacer"></span>
           <span id="orders-count" style="font-size:12px;color:var(--text-dim);font-family:var(--font-mono);"></span>
         </div>
         <div class="table-card">
-          <table>
+          <table class="responsive-table">
             <thead><tr>
-              <th>Order Ref</th><th>Marketplace</th><th>Client</th><th>Marketplace Order ID</th>
-              <th>Product</th><th>Label Tracking</th><th>USPS Tracking</th><th>Status</th><th>Received</th>
+              <th>Order Ref</th><th>Marketplace</th><th>Client</th><th>Delivery Location</th>
+              <th>Product</th><th>Label Created</th><th>Label Tracking</th><th>USPS Tracking</th><th>Status</th><th>Received</th>
             </tr></thead>
             <tbody id="orders-body"></tbody>
           </table>
@@ -135,6 +150,32 @@
         </div>
       </div>
 
+      <!-- STORAGE / INVENTORY -->
+      <div class="view" id="view-storage">
+        <div class="filters">
+          <select id="st-client-filter"><option value="">All clients</option></select>
+          <select id="st-status-filter">
+            <option value="">All statuses</option>
+            <option>In Storage</option><option>Partially Shipped</option><option>Depleted</option><option>Returned to Client</option>
+          </select>
+          <span class="spacer"></span>
+          <button class="btn-primary btn-accent" id="open-new-stock" style="padding:9px 14px;">+ Log Stock Intake</button>
+        </div>
+        <div class="table-card">
+          <table class="responsive-table">
+            <thead><tr>
+              <th>Batch Ref</th><th>Client</th><th>Product</th><th>Cartons Remaining</th><th>Cartons Received</th>
+              <th>Date Received</th><th>Location / Bin</th><th>Status</th>
+            </tr></thead>
+            <tbody id="storage-body"></tbody>
+          </table>
+          <div class="empty-state" id="storage-empty" style="display:none;">
+            <div class="big">No stock logged yet</div>
+            <div>Click "+ Log Stock Intake" whenever a client ships product into the warehouse.</div>
+          </div>
+        </div>
+      </div>
+
       <!-- COMMS -->
       <div class="view" id="view-comms">
         <div class="filters">
@@ -155,18 +196,31 @@
             <div class="field"><label>From date</label><input type="date" id="rep-from"></div>
             <div class="field"><label>To date</label><input type="date" id="rep-to"></div>
             <div class="field"><label>Marketplace</label>
-              <select id="rep-market"><option value="">All</option><option>Amazon FBM</option><option>Etsy Dropship</option><option>eBay Dropship</option></select>
+              <select id="rep-market">
+                <option value="">All</option>
+                <option>Amazon FBM</option><option>Etsy Dropship</option><option>eBay Dropship</option>
+                <option>Walmart Dropship</option><option>Shopify Dropship</option><option>TikTok Shop</option><option>Other</option>
+              </select>
             </div>
             <div class="field"><label>Client</label><input type="text" id="rep-client" placeholder="Leave blank for all"></div>
           </div>
-          <button class="btn-primary" style="margin-top:16px;" id="rep-export">⬇ Export CSV</button>
+          <button class="btn-primary" style="margin-top:16px;" id="rep-export">⬇ Export Orders CSV</button>
           <p style="font-size:12px;color:var(--text-dim);margin-top:10px;">Exports every field including timestamps, tracking numbers, and status history — ready for a client report or bookkeeping.</p>
+        </div>
+
+        <div class="section-title">Export storage / inventory to CSV</div>
+        <div class="table-card" style="padding:20px;">
+          <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Exports every stock batch currently on record, including remaining cartons and status.</p>
+          <button class="btn-primary" id="rep-export-storage">⬇ Export Storage CSV</button>
         </div>
       </div>
 
     </div>
   </div>
 </div>
+
+<!-- FLOATING ACTION BUTTON (mobile) -->
+<button class="fab" id="fab-new-order" aria-label="New Order">+</button>
 
 <!-- NEW ORDER MODAL -->
 <div class="overlay" id="modal-new">
@@ -175,23 +229,30 @@
     <div class="modal-body">
       <div class="form-grid">
         <div class="field"><label>Marketplace *</label>
-          <select id="no-marketplace"><option>Amazon FBM</option><option>Etsy Dropship</option><option>eBay Dropship</option></select>
+          <select id="no-marketplace">
+            <option>Amazon FBM</option><option>Etsy Dropship</option><option>eBay Dropship</option>
+            <option>Walmart Dropship</option><option>Shopify Dropship</option><option>TikTok Shop</option><option>Other</option>
+          </select>
+        </div>
+        <div class="field" id="no-marketplace-other-wrap" style="display:none;">
+          <label>Specify Marketplace *</label>
+          <input type="text" id="no-marketplace-other" placeholder="e.g. Shein, Faire, direct website">
         </div>
         <div class="field"><label>Client *</label><input type="text" id="no-client" placeholder="Client / store name"></div>
-        <div class="field"><label>Marketplace Order ID *</label><input type="text" id="no-market-order-id" placeholder="e.g. 111-2233445-6677889"></div>
+        <div class="field"><label>Delivery Location *</label><input type="text" id="no-delivery-location" placeholder="City, State (or full address)"></div>
         <div class="field"><label>Priority</label>
           <select id="no-priority"><option>Normal</option><option>Urgent</option></select>
         </div>
-        <div class="field span2"><label>Product / SKU *</label><input type="text" id="no-product" placeholder="Product name"></div>
-        <div class="field"><label>SKU</label><input type="text" id="no-sku"></div>
+        <div class="field span2"><label>Product *</label><input type="text" id="no-product" placeholder="Product name"></div>
         <div class="field"><label>Quantity</label><input type="number" id="no-qty" value="1" min="1"></div>
+        <div class="field"><label>Label Creation Date *</label><input type="date" id="no-label-created-date"></div>
         <div class="field span2"><label>Shipping Label Tracking ID *</label><input type="text" id="no-label-tracking" placeholder="Tracking # printed on the label"></div>
         <div class="field span2"><label>Label file link (Drive / email attachment URL)</label><input type="text" id="no-label-url" placeholder="https://..."></div>
         <div class="field span2"><label>Notes for warehouse (optional)</label><textarea id="no-notes" placeholder="Special packaging instructions, fragile items, etc."></textarea></div>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="action-row-btn" data-close="modal-new" style="border:1px solid var(--line);background:none;padding:9px 16px;border-radius:3px;">Cancel</button>
+      <button data-close="modal-new" style="border:1px solid var(--line);background:none;padding:9px 16px;border-radius:3px;">Cancel</button>
       <button class="btn-primary btn-accent" id="no-submit">Create Order</button>
     </div>
   </div>
@@ -210,10 +271,10 @@
       <div class="detail-grid">
         <div><div class="k">Marketplace</div><div class="v" id="dt-marketplace">—</div></div>
         <div><div class="k">Client</div><div class="v" id="dt-client">—</div></div>
-        <div><div class="k">Marketplace Order ID</div><div class="v mono" id="dt-market-id">—</div></div>
+        <div><div class="k">Delivery Location</div><div class="v" id="dt-delivery-location">—</div></div>
         <div><div class="k">Priority</div><div class="v" id="dt-priority">—</div></div>
-        <div><div class="k">Product</div><div class="v" id="dt-product">—</div></div>
-        <div><div class="k">SKU / Qty</div><div class="v" id="dt-sku">—</div></div>
+        <div><div class="k">Product / Qty</div><div class="v" id="dt-product">—</div></div>
+        <div><div class="k">Label Created</div><div class="v mono" id="dt-label-created">—</div></div>
         <div><div class="k">Label Tracking ID</div><div class="v mono" id="dt-label-tracking">—</div></div>
         <div><div class="k">USPS Tracking</div><div class="v mono" id="dt-usps">—</div></div>
       </div>
@@ -241,11 +302,77 @@
   </div>
 </div>
 
+<!-- LOG STOCK INTAKE MODAL -->
+<div class="overlay" id="modal-stock">
+  <div class="modal">
+    <div class="modal-header"><h2>Log Stock Intake</h2><button class="close-btn" data-close="modal-stock">✕</button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field span2"><label>Client *</label><input type="text" id="st-client" placeholder="Client / store name"></div>
+        <div class="field span2"><label>Product *</label><input type="text" id="st-product" placeholder="Product name"></div>
+        <div class="field"><label>Product Ref / SKU (optional)</label><input type="text" id="st-product-ref"></div>
+        <div class="field"><label>Date Received *</label><input type="date" id="st-date-received"></div>
+        <div class="field"><label>Cartons / Boxes Received *</label><input type="number" id="st-cartons" min="1" value="1"></div>
+        <div class="field"><label>Units per Carton (optional)</label><input type="number" id="st-units-per-carton" min="0"></div>
+        <div class="field"><label>Warehouse Location / Bin</label><input type="text" id="st-location" placeholder="e.g. Rack B3"></div>
+        <div class="field"><label>Condition</label>
+          <select id="st-condition"><option>Good</option><option>Partial / Some Damage</option><option>Damaged</option></select>
+        </div>
+        <div class="field span2"><label>Notes (optional)</label><textarea id="st-notes" placeholder="Anything the warehouse team should know"></textarea></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button data-close="modal-stock" style="border:1px solid var(--line);background:none;padding:9px 16px;border-radius:3px;">Cancel</button>
+      <button class="btn-primary btn-accent" id="st-submit">Log Intake</button>
+    </div>
+  </div>
+</div>
+
+<!-- STOCK BATCH DETAIL MODAL -->
+<div class="overlay" id="modal-stock-detail">
+  <div class="modal" style="max-width:680px;">
+    <div class="modal-header">
+      <h2 id="sd-ref">INV-00000000</h2>
+      <button class="close-btn" data-close="modal-stock-detail">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="detail-status-row" id="sd-status-row"></div>
+      <div class="detail-grid">
+        <div><div class="k">Client</div><div class="v" id="sd-client">—</div></div>
+        <div><div class="k">Product</div><div class="v" id="sd-product">—</div></div>
+        <div><div class="k">Product Ref</div><div class="v mono" id="sd-product-ref">—</div></div>
+        <div><div class="k">Date Received</div><div class="v mono" id="sd-date-received">—</div></div>
+        <div><div class="k">Cartons Received</div><div class="v" id="sd-cartons-received">—</div></div>
+        <div><div class="k">Cartons Remaining</div><div class="v" id="sd-cartons-remaining">—</div></div>
+        <div><div class="k">Units / Carton</div><div class="v" id="sd-units">—</div></div>
+        <div><div class="k">Location / Bin</div><div class="v" id="sd-location">—</div></div>
+        <div><div class="k">Condition</div><div class="v" id="sd-condition">—</div></div>
+        <div><div class="k">Logged By</div><div class="v" id="sd-received-by">—</div></div>
+      </div>
+
+      <div class="section-title" style="font-size:14px;">Adjust cartons</div>
+      <div class="form-grid">
+        <div class="field"><label>Change (use − to remove, e.g. -2)</label><input type="number" id="sd-adjust-qty" placeholder="e.g. -2 or 5"></div>
+        <div class="field"><label>Reason</label><input type="text" id="sd-adjust-reason" placeholder="e.g. Shipped in order ORD-..., restock, damage found"></div>
+      </div>
+      <div class="action-row">
+        <button id="sd-apply-adjust">Apply Adjustment</button>
+        <button id="sd-mark-depleted">Mark Depleted</button>
+        <button id="sd-mark-returned">Mark Returned to Client</button>
+      </div>
+
+      <div class="section-title" style="font-size:14px;">Adjustment history</div>
+      <div class="notes-list" id="sd-history"></div>
+    </div>
+  </div>
+</div>
+
 <div class="toast-wrap" id="toast-wrap"></div>
 
 <!-- Firebase (compat SDK — no build step needed) -->
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script src="js/firebase-config.js"></script>
 <script src="js/app.js"></script>
 </body>
