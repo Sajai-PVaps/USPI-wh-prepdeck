@@ -2,16 +2,22 @@
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const ORDERS = db.collection('orders');
+const INVENTORY = db.collection('inventory');
 
 /* ===================== State ===================== */
-let allOrders = [];      // live array kept in sync with Firestore
-let currentUser = null;  // {name, team}
+let allOrders = [];
+let allInventory = [];
+let currentUser = null;
 let ordersUnsub = null;
+let inventoryUnsub = null;
 
 const STATUSES = ["Order Received","Label Acknowledged","Packed","Shipped","Delivered","Exception"];
 const STATUS_CLASS = {
   "Order Received":"tag-received","Label Acknowledged":"tag-ack","Packed":"tag-packed",
   "Shipped":"tag-shipped","Delivered":"tag-delivered","Exception":"tag-exception"
+};
+const STORAGE_STATUS_CLASS = {
+  "In Storage":"tag-instorage","Partially Shipped":"tag-partial","Depleted":"tag-depleted","Returned to Client":"tag-returned"
 };
 
 /* ===================== Helpers ===================== */
@@ -26,12 +32,15 @@ function toast(msg, isErr){
   wrap.appendChild(el);
   setTimeout(()=>el.remove(), 3800);
 }
-
 function fmtDateTime(ms){
   if(!ms) return '—';
   const d = new Date(ms);
   return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ', ' +
          d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+}
+function fmtDate(ms){
+  if(!ms) return '—';
+  return new Date(ms).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
 }
 function timeAgo(ms){
   if(!ms) return '—';
@@ -46,11 +55,18 @@ function isToday(ms){
   const d = new Date(ms), n = new Date();
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
 }
-function genOrderRef(){
-  return 'ORD-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase();
+function dateInputToMs(val){
+  if(!val) return null;
+  return new Date(val + 'T00:00:00').getTime();
+}
+function genRef(prefix){
+  return prefix + '-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase();
 }
 function openModal(id){ $('#'+id).classList.add('active'); }
 function closeModal(id){ $('#'+id).classList.remove('active'); }
+function marketplaceLabel(o){
+  return o.marketplace === 'Other' && o.marketplaceOther ? 'Other: '+o.marketplaceOther : o.marketplace;
+}
 
 /* ===================== Login gate ===================== */
 function initGate(){
@@ -83,18 +99,46 @@ $('#switch-user').addEventListener('click', ()=>{
   location.reload();
 });
 
+/* ===================== Mobile nav (drawer + FAB) ===================== */
+function openDrawer(){ $('#sidebar').classList.add('open'); $('#sidebar-backdrop').classList.add('open'); }
+function closeDrawer(){ $('#sidebar').classList.remove('open'); $('#sidebar-backdrop').classList.remove('open'); }
+$('#hamburger').addEventListener('click', openDrawer);
+$('#sidebar-close').addEventListener('click', closeDrawer);
+$('#sidebar-backdrop').addEventListener('click', closeDrawer);
+$('#fab-new-order').addEventListener('click', ()=>openModal('modal-new'));
+
 /* ===================== Firestore sync ===================== */
 function startSync(){
-  ordersUnsub = ORDERS.orderBy('createdAt','desc').limit(3000)
-    .onSnapshot(snap => {
-      allOrders = snap.docs.map(d => ({id:d.id, ...d.data()}));
-      $('#conn-status').innerHTML = '<span class="conn-dot"></span>Live sync';
-      renderAll();
-    }, err => {
-      console.error(err);
-      $('#conn-status').innerHTML = '<span class="conn-dot off"></span>Connection error';
-      toast('Could not reach the database. Check firebase-config.js and your Firestore rules.', true);
-    });
+  // Sign in anonymously first. Firestore rules require request.auth != null,
+  // so nobody can read or write data without going through Firebase Auth —
+  // just having the public web API key isn't enough on its own.
+  firebase.auth().signInAnonymously().catch(err=>{
+    console.error(err);
+    $('#conn-status').innerHTML = '<span class="conn-dot off"></span>Sign-in error';
+    toast('Could not authenticate. In the Firebase console, make sure Authentication → Sign-in method → Anonymous is enabled.', true);
+  });
+
+  firebase.auth().onAuthStateChanged(user=>{
+    if(!user) return;
+    if(ordersUnsub) return; // already listening
+
+    ordersUnsub = ORDERS.orderBy('createdAt','desc').limit(3000)
+      .onSnapshot(snap => {
+        allOrders = snap.docs.map(d => ({id:d.id, ...d.data()}));
+        $('#conn-status').innerHTML = '<span class="conn-dot"></span>Live sync';
+        renderAll();
+      }, err => {
+        console.error(err);
+        $('#conn-status').innerHTML = '<span class="conn-dot off"></span>Connection error';
+        toast('Could not reach the database. Check firebase-config.js and your Firestore rules.', true);
+      });
+
+    inventoryUnsub = INVENTORY.orderBy('createdAt','desc').limit(3000)
+      .onSnapshot(snap => {
+        allInventory = snap.docs.map(d => ({id:d.id, ...d.data()}));
+        renderAll();
+      }, err => console.error(err));
+  });
 }
 
 /* ===================== Nav ===================== */
@@ -104,7 +148,8 @@ $$('.nav-btn').forEach(btn=>{
     btn.classList.add('active');
     $$('.view').forEach(v=>v.classList.remove('active'));
     $('#view-'+btn.dataset.view).classList.add('active');
-    $('#view-title').textContent = btn.textContent.replace(/^\S+\s/, '');
+    $('#view-title').textContent = btn.textContent.trim();
+    closeDrawer();
   });
 });
 
@@ -114,6 +159,7 @@ function renderAll(){
   renderOrdersTable();
   renderKanban();
   renderComms();
+  renderStorage();
 }
 
 /* ---- Dashboard ---- */
@@ -132,11 +178,19 @@ function renderDashboard(){
   const cutoff = Date.now() - 30*86400000;
   const recent = allOrders.filter(o=>o.createdAt >= cutoff);
   const mix = {};
-  recent.forEach(o=> mix[o.marketplace] = (mix[o.marketplace]||0)+1 );
+  recent.forEach(o=>{ const k = marketplaceLabel(o); mix[k] = (mix[k]||0)+1; });
   const mixEl = $('#market-mix');
   mixEl.innerHTML = Object.keys(mix).length ? Object.entries(mix).map(([k,v])=>`
     <div class="stat-card"><div class="num">${v}</div><div class="lbl">${k}</div></div>
   `).join('') : `<div style="color:var(--text-dim);font-size:13px;">No orders in the last 30 days yet.</div>`;
+
+  // storage snapshot
+  const active = allInventory.filter(s=>s.status!=='Depleted' && s.status!=='Returned to Client');
+  const clients = new Set(active.map(s=>s.client));
+  const cartons = active.reduce((sum,s)=>sum + (s.cartonsRemaining||0), 0);
+  $('#stat-storage-clients').textContent = clients.size;
+  $('#stat-storage-cartons').textContent = cartons;
+  $('#stat-storage-batches').textContent = active.length;
 
   // attention list
   const attention = allOrders.filter(o=>{
@@ -152,12 +206,12 @@ function renderDashboard(){
   } else {
     body.innerHTML = attention.map(o=>`
       <tr onclick="showDetail('${o.id}')">
-        <td class="mono">${o.orderRef}</td>
-        <td><span class="pill-market">${o.marketplace}</span></td>
-        <td>${o.client}</td>
-        <td>${o.productName}</td>
-        <td><span class="tag ${STATUS_CLASS[o.status]}">${o.status}</span></td>
-        <td class="mono">${timeAgo(o.createdAt)}</td>
+        <td data-label="Order Ref" class="mono">${o.orderRef}</td>
+        <td data-label="Marketplace"><span class="pill-market">${marketplaceLabel(o)}</span></td>
+        <td data-label="Client">${o.client}</td>
+        <td data-label="Product">${o.productName}</td>
+        <td data-label="Status"><span class="tag ${STATUS_CLASS[o.status]}">${o.status}</span></td>
+        <td data-label="Age" class="mono">${timeAgo(o.createdAt)}</td>
       </tr>
     `).join('');
   }
@@ -185,15 +239,16 @@ function renderOrdersTable(){
 
   $('#orders-body').innerHTML = list.map(o=>`
     <tr onclick="showDetail('${o.id}')">
-      <td class="mono">${o.orderRef}</td>
-      <td><span class="pill-market">${o.marketplace}</span></td>
-      <td>${o.client}${o.priority==='Urgent'?' <span class="priority-urgent">● URGENT</span>':''}</td>
-      <td class="mono">${o.marketplaceOrderId||'—'}</td>
-      <td>${o.productName}</td>
-      <td>${o.labelTrackingId ? `<span class="code-chip">${o.labelTrackingId}</span>` : '—'}</td>
-      <td>${o.uspsTrackingNumber ? `<span class="code-chip">${o.uspsTrackingNumber}</span>` : '—'}</td>
-      <td><span class="tag ${STATUS_CLASS[o.status]}">${o.status}</span></td>
-      <td class="mono">${fmtDateTime(o.createdAt)}</td>
+      <td data-label="Order Ref" class="mono">${o.orderRef}</td>
+      <td data-label="Marketplace"><span class="pill-market">${marketplaceLabel(o)}</span></td>
+      <td data-label="Client">${o.client}${o.priority==='Urgent'?' <span class="priority-urgent">● URGENT</span>':''}</td>
+      <td data-label="Delivery Location">${o.deliveryLocation||'—'}</td>
+      <td data-label="Product">${o.productName}${o.quantity>1?' ×'+o.quantity:''}</td>
+      <td data-label="Label Created" class="mono">${o.labelCreatedDate ? fmtDate(o.labelCreatedDate) : '—'}</td>
+      <td data-label="Label Tracking">${o.labelTrackingId ? `<span class="code-chip">${o.labelTrackingId}</span>` : '—'}</td>
+      <td data-label="USPS Tracking">${o.uspsTrackingNumber ? `<span class="code-chip">${o.uspsTrackingNumber}</span>` : '—'}</td>
+      <td data-label="Status"><span class="tag ${STATUS_CLASS[o.status]}">${o.status}</span></td>
+      <td data-label="Received" class="mono">${fmtDateTime(o.createdAt)}</td>
     </tr>
   `).join('');
 }
@@ -213,7 +268,7 @@ function renderKanban(){
     <div class="k-card" onclick="showDetail('${o.id}')">
       <div class="ref">${o.orderRef} ${o.priority==='Urgent'?'<span class="priority-urgent">● URGENT</span>':''}</div>
       <div class="prod">${o.productName} — ${o.client}</div>
-      <div class="meta"><span class="pill-market">${o.marketplace}</span><span class="mono" style="font-size:11px;color:var(--text-dim);">${timeAgo(o.createdAt)} ago</span></div>
+      <div class="meta"><span class="pill-market">${marketplaceLabel(o)}</span><span class="mono" style="font-size:11px;color:var(--text-dim);">${timeAgo(o.createdAt)} ago</span></div>
       <button class="quick" onclick="event.stopPropagation();${actionFn}('${o.id}')">${actionLabel}</button>
     </div>`;
 
@@ -277,29 +332,43 @@ function renderComms(){
 $('#open-new-order').addEventListener('click', ()=>openModal('modal-new'));
 $$('[data-close]').forEach(b=>b.addEventListener('click', ()=>closeModal(b.dataset.close)));
 
+$('#no-marketplace').addEventListener('change', ()=>{
+  $('#no-marketplace-other-wrap').style.display = $('#no-marketplace').value==='Other' ? 'block' : 'none';
+});
+
 $('#no-submit').addEventListener('click', async ()=>{
   const client = $('#no-client').value.trim();
-  const marketId = $('#no-market-order-id').value.trim();
+  const deliveryLocation = $('#no-delivery-location').value.trim();
   const product = $('#no-product').value.trim();
   const labelTracking = $('#no-label-tracking').value.trim();
-  if(!client || !marketId || !product || !labelTracking){
-    toast('Fill in client, marketplace order ID, product, and label tracking ID.', true);
+  const marketplace = $('#no-marketplace').value;
+  const marketplaceOther = $('#no-marketplace-other').value.trim();
+  const labelCreatedDate = dateInputToMs($('#no-label-created-date').value);
+
+  if(!client || !deliveryLocation || !product || !labelTracking || !labelCreatedDate){
+    toast('Fill in client, delivery location, product, label creation date, and label tracking ID.', true);
     return;
   }
-  const orderRef = genOrderRef();
+  if(marketplace==='Other' && !marketplaceOther){
+    toast('Specify the marketplace name.', true);
+    return;
+  }
+
+  const orderRef = genRef('ORD');
   const notes = [];
   const noteText = $('#no-notes').value.trim();
   if(noteText) notes.push({id:'n'+Date.now(), text:noteText, author:currentUser.name, team:currentUser.team, type:'note', createdAt:Date.now()});
 
   const order = {
     orderRef,
-    marketplace: $('#no-marketplace').value,
+    marketplace,
+    marketplaceOther: marketplace==='Other' ? marketplaceOther : '',
     client,
-    marketplaceOrderId: marketId,
+    deliveryLocation,
     productName: product,
-    sku: $('#no-sku').value.trim(),
     quantity: Number($('#no-qty').value)||1,
     priority: $('#no-priority').value,
+    labelCreatedDate,
     labelTrackingId: labelTracking,
     labelUrl: $('#no-label-url').value.trim(),
     status: 'Order Received',
@@ -313,8 +382,10 @@ $('#no-submit').addEventListener('click', async ()=>{
     await ORDERS.doc(orderRef).set(order);
     toast('Order '+orderRef+' created.');
     closeModal('modal-new');
-    ['no-client','no-market-order-id','no-product','no-sku','no-label-tracking','no-label-url','no-notes'].forEach(id=>$('#'+id).value='');
+    ['no-client','no-delivery-location','no-product','no-label-tracking','no-label-url','no-notes','no-marketplace-other'].forEach(id=>$('#'+id).value='');
     $('#no-qty').value = 1;
+    $('#no-label-created-date').value = '';
+    $('#no-marketplace-other-wrap').style.display = 'none';
   }catch(e){
     console.error(e);
     toast('Could not save the order. Check your connection.', true);
@@ -330,19 +401,18 @@ function showDetail(id){
   detailOrderId = id;
 
   $('#dt-ref').textContent = o.orderRef;
-  $('#dt-marketplace').innerHTML = `<span class="pill-market">${o.marketplace}</span>`;
+  $('#dt-marketplace').innerHTML = `<span class="pill-market">${marketplaceLabel(o)}</span>`;
   $('#dt-client').textContent = o.client;
-  $('#dt-market-id').textContent = o.marketplaceOrderId || '—';
+  $('#dt-delivery-location').textContent = o.deliveryLocation || '—';
   $('#dt-priority').innerHTML = o.priority==='Urgent' ? '<span class="priority-urgent">● URGENT</span>' : 'Normal';
-  $('#dt-product').textContent = o.productName;
-  $('#dt-sku').textContent = (o.sku||'—') + ' · Qty ' + (o.quantity||1);
+  $('#dt-product').textContent = o.productName + (o.quantity ? ' · Qty '+o.quantity : '');
+  $('#dt-label-created').textContent = o.labelCreatedDate ? fmtDate(o.labelCreatedDate) : '—';
   $('#dt-label-tracking').textContent = o.labelTrackingId || '—';
   $('#dt-usps').textContent = o.uspsTrackingNumber || '—';
 
   $('#dt-status-row').innerHTML = `<span class="tag ${STATUS_CLASS[o.status]}" style="font-size:12px;padding:6px 12px;">${o.status}</span>
     ${o.deliveryStatus ? `<span class="tag outline" style="color:var(--text-dim);">USPS: ${o.deliveryStatus}</span>` : ''}`;
 
-  // timeline
   const steps = [
     {label:'Order received', done:!!o.createdAt, ts:o.createdAt, by:o.intakeBy},
     {label:'Label acknowledged by warehouse', done:!!o.warehouseAckAt, ts:o.warehouseAckAt, by:o.warehouseAckBy},
@@ -357,7 +427,6 @@ function showDetail(id){
     </div>
   `).join('');
 
-  // actions based on status
   const actions = [];
   if(o.status==='Order Received') actions.push(['✓ Acknowledge Label', ()=>quickAck(o.id).then(refreshDetail)]);
   if(o.status==='Label Acknowledged') actions.push(['✓ Mark Packed', ()=>quickPack(o.id).then(refreshDetail)]);
@@ -375,7 +444,6 @@ function showDetail(id){
   $('#dt-actions').innerHTML = actions.map((a,i)=>`<button data-i="${i}">${a[0]}</button>`).join('');
   $$('#dt-actions button').forEach((btn,i)=> btn.addEventListener('click', actions[i][1]) );
 
-  // notes
   const notes = (o.notes||[]).slice().sort((a,b)=>b.createdAt-a.createdAt);
   $('#dt-notes').innerHTML = notes.length ? notes.map(n=>`
     <div class="note type-${n.type}">
@@ -415,6 +483,156 @@ $('#dt-add-note').addEventListener('click', ()=>addNoteToOrder('note'));
 $('#dt-add-whatsapp').addEventListener('click', ()=>addNoteToOrder('whatsapp'));
 $('#dt-flag-issue').addEventListener('click', ()=>addNoteToOrder('issue'));
 
+/* ===================== STORAGE / INVENTORY ===================== */
+function refreshStorageClientFilter(){
+  const sel = $('#st-client-filter');
+  const current = sel.value;
+  const clients = Array.from(new Set(allInventory.map(s=>s.client))).sort();
+  sel.innerHTML = '<option value="">All clients</option>' + clients.map(c=>`<option ${c===current?'selected':''}>${c}</option>`).join('');
+}
+
+function renderStorage(){
+  refreshStorageClientFilter();
+  const cFilter = $('#st-client-filter').value;
+  const sFilter = $('#st-status-filter').value;
+
+  let list = allInventory.filter(s=>{
+    if(cFilter && s.client !== cFilter) return false;
+    if(sFilter && s.status !== sFilter) return false;
+    return true;
+  });
+
+  $('#storage-empty').style.display = list.length ? 'none' : 'block';
+  $('#storage-body').innerHTML = list.map(s=>`
+    <tr onclick="showStockDetail('${s.id}')">
+      <td data-label="Batch Ref" class="mono">${s.invRef}</td>
+      <td data-label="Client">${s.client}</td>
+      <td data-label="Product">${s.productName}${s.productRef?' <span class="mono" style="color:var(--text-dim);font-size:11px;">('+s.productRef+')</span>':''}</td>
+      <td data-label="Cartons Remaining"><b>${s.cartonsRemaining}</b></td>
+      <td data-label="Cartons Received">${s.cartonsReceived}</td>
+      <td data-label="Date Received" class="mono">${fmtDate(s.dateReceived)}</td>
+      <td data-label="Location / Bin">${s.warehouseLocation||'—'}</td>
+      <td data-label="Status"><span class="tag ${STORAGE_STATUS_CLASS[s.status]}">${s.status}</span></td>
+    </tr>
+  `).join('');
+}
+['st-client-filter','st-status-filter'].forEach(id=>$('#'+id).addEventListener('change', renderStorage));
+
+$('#open-new-stock').addEventListener('click', ()=>openModal('modal-stock'));
+
+$('#st-submit').addEventListener('click', async ()=>{
+  const client = $('#st-client').value.trim();
+  const product = $('#st-product').value.trim();
+  const cartons = Number($('#st-cartons').value);
+  const dateReceived = dateInputToMs($('#st-date-received').value);
+
+  if(!client || !product || !cartons || cartons < 1 || !dateReceived){
+    toast('Fill in client, product, cartons received, and date received.', true);
+    return;
+  }
+
+  const invRef = genRef('INV');
+  const batch = {
+    invRef,
+    client,
+    productName: product,
+    productRef: $('#st-product-ref').value.trim(),
+    cartonsReceived: cartons,
+    cartonsRemaining: cartons,
+    unitsPerCarton: Number($('#st-units-per-carton').value) || null,
+    dateReceived,
+    warehouseLocation: $('#st-location').value.trim(),
+    condition: $('#st-condition').value,
+    notes: $('#st-notes').value.trim(),
+    status: 'In Storage',
+    receivedBy: currentUser.name,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    adjustments: []
+  };
+  try{
+    await INVENTORY.doc(invRef).set(batch);
+    toast('Stock intake logged: '+invRef);
+    closeModal('modal-stock');
+    ['st-client','st-product','st-product-ref','st-location','st-notes'].forEach(id=>$('#'+id).value='');
+    $('#st-cartons').value = 1;
+    $('#st-units-per-carton').value = '';
+    $('#st-date-received').value = '';
+  }catch(e){
+    console.error(e);
+    toast('Could not save the stock intake. Check your connection.', true);
+  }
+});
+
+let detailStockId = null;
+function showStockDetail(id){
+  const s = allInventory.find(x=>x.id===id);
+  if(!s) return;
+  detailStockId = id;
+
+  $('#sd-ref').textContent = s.invRef;
+  $('#sd-status-row').innerHTML = `<span class="tag ${STORAGE_STATUS_CLASS[s.status]}" style="font-size:12px;padding:6px 12px;">${s.status}</span>`;
+  $('#sd-client').textContent = s.client;
+  $('#sd-product').textContent = s.productName;
+  $('#sd-product-ref').textContent = s.productRef || '—';
+  $('#sd-date-received').textContent = fmtDate(s.dateReceived);
+  $('#sd-cartons-received').textContent = s.cartonsReceived;
+  $('#sd-cartons-remaining').textContent = s.cartonsRemaining;
+  $('#sd-units').textContent = s.unitsPerCarton || '—';
+  $('#sd-location').textContent = s.warehouseLocation || '—';
+  $('#sd-condition').textContent = s.condition || '—';
+  $('#sd-received-by').textContent = s.receivedBy || '—';
+
+  const hist = (s.adjustments||[]).slice().sort((a,b)=>b.at-a.at);
+  $('#sd-history').innerHTML = hist.length ? hist.map(a=>`
+    <div class="note">
+      <div class="head"><span><b>${a.by}</b></span><span>${fmtDateTime(a.at)}</span></div>
+      <div>${a.delta>0?'+':''}${a.delta} cartons — ${a.reason||'No reason given'}</div>
+    </div>
+  `).join('') : `<div style="color:var(--text-dim);font-size:12.5px;">No adjustments yet.</div>`;
+
+  $('#sd-adjust-qty').value = '';
+  $('#sd-adjust-reason').value = '';
+  openModal('modal-stock-detail');
+}
+window.showStockDetail = showStockDetail;
+
+$('#sd-apply-adjust').addEventListener('click', async ()=>{
+  const s = allInventory.find(x=>x.id===detailStockId);
+  if(!s) return;
+  const delta = Number($('#sd-adjust-qty').value);
+  const reason = $('#sd-adjust-reason').value.trim();
+  if(!delta){ toast('Enter a positive or negative number of cartons.', true); return; }
+
+  const newRemaining = Math.max(0, s.cartonsRemaining + delta);
+  let newStatus = s.status;
+  if(newRemaining === 0) newStatus = 'Depleted';
+  else if(newRemaining < s.cartonsReceived) newStatus = 'Partially Shipped';
+  else newStatus = 'In Storage';
+
+  const adj = {id:'a'+Date.now(), delta, reason, by: currentUser.name, at: Date.now()};
+  await INVENTORY.doc(s.id).update({
+    cartonsRemaining: newRemaining, status: newStatus,
+    adjustments: [...(s.adjustments||[]), adj], updatedAt: Date.now()
+  });
+  toast('Stock adjusted.');
+  setTimeout(()=>showStockDetail(s.id), 250);
+});
+$('#sd-mark-depleted').addEventListener('click', async ()=>{
+  const s = allInventory.find(x=>x.id===detailStockId);
+  if(!s) return;
+  await INVENTORY.doc(s.id).update({status:'Depleted', updatedAt: Date.now()});
+  toast('Marked depleted.');
+  setTimeout(()=>showStockDetail(s.id), 250);
+});
+$('#sd-mark-returned').addEventListener('click', async ()=>{
+  const s = allInventory.find(x=>x.id===detailStockId);
+  if(!s) return;
+  await INVENTORY.doc(s.id).update({status:'Returned to Client', updatedAt: Date.now()});
+  toast('Marked returned to client.');
+  setTimeout(()=>showStockDetail(s.id), 250);
+});
+
 /* ===================== Global search ===================== */
 $('#global-search').addEventListener('keydown', async (e)=>{
   if(e.key !== 'Enter') return;
@@ -422,16 +640,15 @@ $('#global-search').addEventListener('keydown', async (e)=>{
   if(!term) return;
 
   let match = allOrders.find(o =>
-    o.orderRef===term || o.marketplaceOrderId===term || o.labelTrackingId===term || o.uspsTrackingNumber===term
+    o.orderRef===term || o.deliveryLocation===term || o.labelTrackingId===term || o.uspsTrackingNumber===term
   );
 
   if(!match){
-    // fall back to a direct Firestore lookup in case it's outside the loaded window
     try{
       const byId = await ORDERS.doc(term).get();
       if(byId.exists){ match = {id:byId.id, ...byId.data()}; }
       else {
-        for(const field of ['marketplaceOrderId','labelTrackingId','uspsTrackingNumber']){
+        for(const field of ['labelTrackingId','uspsTrackingNumber']){
           const q = await ORDERS.where(field,'==',term).limit(1).get();
           if(!q.empty){ match = {id:q.docs[0].id, ...q.docs[0].data()}; break; }
         }
@@ -439,8 +656,12 @@ $('#global-search').addEventListener('keydown', async (e)=>{
     }catch(err){ console.error(err); }
   }
 
-  if(match){ showDetail(match.id); }
-  else toast('No order found matching "'+term+'".', true);
+  if(match){ showDetail(match.id); return; }
+
+  const stockMatch = allInventory.find(s => s.invRef===term || s.productRef===term);
+  if(stockMatch){ showStockDetail(stockMatch.id); return; }
+
+  toast('No order or stock batch found matching "'+term+'".', true);
 });
 
 /* ===================== Reports / CSV export ===================== */
@@ -459,15 +680,15 @@ $('#rep-export').addEventListener('click', ()=>{
 
   if(!rows.length){ toast('No orders match those filters.', true); return; }
 
-  const headers = ['Order Ref','Marketplace','Client','Marketplace Order ID','Product','SKU','Qty','Priority',
-    'Label Tracking ID','USPS Tracking','Status','Delivery Status','Intake By','Received At','Ack By','Ack At',
-    'Packed By','Packed At','Shipped By','Shipped At','Delivered At'];
+  const headers = ['Order Ref','Marketplace','Client','Delivery Location','Product','Qty','Priority',
+    'Label Created','Label Tracking ID','USPS Tracking','Status','Delivery Status','Intake By','Received At',
+    'Ack By','Ack At','Packed By','Packed At','Shipped By','Shipped At','Delivered At'];
   const csvRows = [headers.join(',')];
   rows.forEach(o=>{
-    const line = [o.orderRef,o.marketplace,o.client,o.marketplaceOrderId,o.productName,o.sku,o.quantity,o.priority,
-      o.labelTrackingId,o.uspsTrackingNumber,o.status,o.deliveryStatus,o.intakeBy,fmtDateTime(o.createdAt),
-      o.warehouseAckBy,fmtDateTime(o.warehouseAckAt),o.packedBy,fmtDateTime(o.packedAt),o.shippedBy,
-      fmtDateTime(o.shippedAt),fmtDateTime(o.deliveredAt)]
+    const line = [o.orderRef,marketplaceLabel(o),o.client,o.deliveryLocation,o.productName,o.quantity,o.priority,
+      fmtDate(o.labelCreatedDate),o.labelTrackingId,o.uspsTrackingNumber,o.status,o.deliveryStatus,o.intakeBy,
+      fmtDateTime(o.createdAt),o.warehouseAckBy,fmtDateTime(o.warehouseAckAt),o.packedBy,fmtDateTime(o.packedAt),
+      o.shippedBy,fmtDateTime(o.shippedAt),fmtDateTime(o.deliveredAt)]
       .map(v => `"${(v??'').toString().replace(/"/g,'""')}"`).join(',');
     csvRows.push(line);
   });
@@ -477,6 +698,25 @@ $('#rep-export').addEventListener('click', ()=>{
   a.download = 'prep-deck-orders-'+new Date().toISOString().slice(0,10)+'.csv';
   a.click();
   toast('Exported '+rows.length+' orders.');
+});
+
+$('#rep-export-storage').addEventListener('click', ()=>{
+  if(!allInventory.length){ toast('No stock batches logged yet.', true); return; }
+  const headers = ['Batch Ref','Client','Product','Product Ref','Cartons Received','Cartons Remaining',
+    'Units per Carton','Date Received','Location / Bin','Condition','Status','Logged By'];
+  const csvRows = [headers.join(',')];
+  allInventory.forEach(s=>{
+    const line = [s.invRef,s.client,s.productName,s.productRef,s.cartonsReceived,s.cartonsRemaining,
+      s.unitsPerCarton,fmtDate(s.dateReceived),s.warehouseLocation,s.condition,s.status,s.receivedBy]
+      .map(v => `"${(v??'').toString().replace(/"/g,'""')}"`).join(',');
+    csvRows.push(line);
+  });
+  const blob = new Blob([csvRows.join('\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'prep-deck-storage-'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  toast('Exported '+allInventory.length+' stock batches.');
 });
 
 /* ===================== Boot ===================== */
