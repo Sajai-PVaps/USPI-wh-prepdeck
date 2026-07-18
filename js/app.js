@@ -3,13 +3,16 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const ORDERS = db.collection('orders');
 const INVENTORY = db.collection('inventory');
+const TEAM_MEMBERS = db.collection('team_members');
 
 /* ===================== State ===================== */
 let allOrders = [];
 let allInventory = [];
-let currentUser = null;
+let allTeamMembers = [];
+let currentUser = null;   // {email, name, team}
 let ordersUnsub = null;
 let inventoryUnsub = null;
+let teamMembersUnsub = null;
 
 const STATUSES = ["Order Received","Label Acknowledged","Packed","Shipped","Delivered","Exception"];
 const STATUS_CLASS = {
@@ -19,6 +22,22 @@ const STATUS_CLASS = {
 const STORAGE_STATUS_CLASS = {
   "In Storage":"tag-instorage","Partially Shipped":"tag-partial","Depleted":"tag-depleted","Returned to Client":"tag-returned"
 };
+
+// Mirrors the Firestore security rules — used here only to decide which
+// buttons to SHOW. The real enforcement lives server-side in Firestore
+// Rules; a user could inspect this file and remove the hiding, but the
+// database itself will still reject any write their team isn't allowed
+// to make. See README.md -> "Security".
+const STATUS_PERMISSIONS = {
+  'Warehouse': ['Label Acknowledged','Packed','Shipped','Exception'],
+  'Transactions': ['Delivered','Exception','Shipped'],
+  'Admin': STATUSES
+};
+function canSetStatus(team, status){
+  return (STATUS_PERMISSIONS[team]||[]).includes(status);
+}
+function canCreateOrders(team){ return team==='Order Intake' || team==='Admin'; }
+function canManageStorage(team){ return team==='Warehouse' || team==='Admin'; }
 
 /* ===================== Helpers ===================== */
 const $ = s => document.querySelector(s);
@@ -68,36 +87,110 @@ function marketplaceLabel(o){
   return o.marketplace === 'Other' && o.marketplaceOther ? 'Other: '+o.marketplaceOther : o.marketplace;
 }
 
-/* ===================== Login gate ===================== */
-function initGate(){
-  const saved = localStorage.getItem('prepdeck_user');
-  if(saved){
-    currentUser = JSON.parse(saved);
-    enterApp();
-    return;
+/* ===================== Login gate (real per-person accounts) ===================== */
+// Soft, client-side cool-down after repeated failed attempts. This is a UX
+// nicety only — the real brute-force protection is Firebase Authentication's
+// own server-side throttling, which can't be bypassed by clearing local
+// storage. See README.md -> "Security".
+const LOGIN_ATTEMPTS_KEY = 'prepdeck_login_attempts';
+function getAttempts(){
+  try{ return JSON.parse(localStorage.getItem(LOGIN_ATTEMPTS_KEY)) || {count:0, first:0}; }
+  catch(e){ return {count:0, first:0}; }
+}
+function recordFailedAttempt(){
+  const a = getAttempts();
+  const now = Date.now();
+  if(now - a.first > 5*60000){ a.count = 0; a.first = now; }
+  a.count += 1;
+  localStorage.setItem(LOGIN_ATTEMPTS_KEY, JSON.stringify(a));
+  return a;
+}
+function clearAttempts(){ localStorage.removeItem(LOGIN_ATTEMPTS_KEY); }
+function cooldownRemaining(){
+  const a = getAttempts();
+  if(a.count < 5) return 0;
+  const elapsed = Date.now() - a.first;
+  const wait = 2*60000 - elapsed;
+  return wait > 0 ? wait : 0;
+}
+function updateGateButtonState(){
+  const remaining = cooldownRemaining();
+  const btn = $('#gate-submit');
+  if(remaining > 0){
+    btn.disabled = true;
+    const secs = Math.ceil(remaining/1000);
+    $('#gate-error').textContent = `Too many failed attempts. Try again in ${Math.ceil(secs/60)} minute(s).`;
+    setTimeout(updateGateButtonState, 1000);
+  } else {
+    btn.disabled = false;
   }
-  $('#gate-submit').addEventListener('click', ()=>{
-    const name = $('#gate-name').value.trim();
-    const team = $('#gate-team').value;
-    const code = $('#gate-code').value;
-    if(!name){ $('#gate-error').textContent = 'Enter your name.'; return; }
-    if(code !== ACCESS_CODE){ $('#gate-error').textContent = 'Incorrect access code.'; return; }
-    currentUser = {name, team};
-    localStorage.setItem('prepdeck_user', JSON.stringify(currentUser));
-    enterApp();
+}
+
+function initGate(){
+  updateGateButtonState();
+  $('#gate-submit').addEventListener('click', async ()=>{
+    if(cooldownRemaining() > 0) return;
+    const email = $('#gate-email').value.trim().toLowerCase();
+    const password = $('#gate-password').value;
+    $('#gate-error').textContent = '';
+    if(!email || !password){ $('#gate-error').textContent = 'Enter your email and password.'; return; }
+
+    try{
+      await firebase.auth().signInWithEmailAndPassword(email, password);
+      clearAttempts();
+      // enterApp() runs from onAuthStateChanged once the profile loads
+    }catch(err){
+      recordFailedAttempt();
+      updateGateButtonState();
+      console.error(err);
+      if(cooldownRemaining() > 0) return; // updateGateButtonState() already set the cooldown message
+      if(err.code === 'auth/too-many-requests'){
+        $('#gate-error').textContent = 'Too many attempts — Firebase has temporarily locked this out. Try again shortly.';
+      } else if(err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential'){
+        $('#gate-error').textContent = 'Incorrect email or password.';
+      } else if(err.code === 'auth/invalid-email'){
+        $('#gate-error').textContent = 'That email address doesn\u2019t look right.';
+      } else {
+        $('#gate-error').textContent = 'Could not sign in. Check your connection and try again.';
+      }
+    }
   });
 }
-function enterApp(){
+
+function showGate(){
+  $('#app').style.display = 'none';
+  $('#gate').style.display = 'flex';
+  $('#gate-password').value = '';
+  updateGateButtonState();
+}
+
+function enterApp(profile){
+  currentUser = profile;
   $('#gate').style.display = 'none';
   $('#app').style.display = 'flex';
   $('#who-name').textContent = currentUser.name;
   $('#who-team').textContent = currentUser.team;
+  $('#nav-admin').style.display = currentUser.team === 'Admin' ? 'flex' : 'none';
+  $('#open-new-order').style.display = canCreateOrders(currentUser.team) ? 'flex' : 'none';
+  $('#fab-new-order').style.display = canCreateOrders(currentUser.team) ? 'flex' : 'none';
   startSync();
 }
-$('#switch-user').addEventListener('click', ()=>{
-  localStorage.removeItem('prepdeck_user');
-  location.reload();
-});
+
+/* Both buttons perform a full, real sign-out. With per-person logins, there
+   is no safe way to "switch" to another teammate without their own
+   password — letting that happen would defeat the whole point of individual
+   accounts. Both are offered because people expect the option, but the next
+   person always has to sign in with their own credentials. */
+function doSignOut(){
+  if(ordersUnsub) ordersUnsub();
+  if(inventoryUnsub) inventoryUnsub();
+  if(teamMembersUnsub) teamMembersUnsub();
+  ordersUnsub = inventoryUnsub = teamMembersUnsub = null;
+  allOrders = []; allInventory = []; allTeamMembers = [];
+  firebase.auth().signOut();
+}
+$('#switch-user').addEventListener('click', doSignOut);
+$('#log-out').addEventListener('click', doSignOut);
 
 /* ===================== Mobile nav (drawer + FAB) ===================== */
 function openDrawer(){ $('#sidebar').classList.add('open'); $('#sidebar-backdrop').classList.add('open'); }
@@ -107,38 +200,49 @@ $('#sidebar-close').addEventListener('click', closeDrawer);
 $('#sidebar-backdrop').addEventListener('click', closeDrawer);
 $('#fab-new-order').addEventListener('click', ()=>openModal('modal-new'));
 
-/* ===================== Firestore sync ===================== */
-function startSync(){
-  // Sign in anonymously first. Firestore rules require request.auth != null,
-  // so nobody can read or write data without going through Firebase Auth —
-  // just having the public web API key isn't enough on its own.
-  firebase.auth().signInAnonymously().catch(err=>{
+/* ===================== Auth state + Firestore sync ===================== */
+firebase.auth().onAuthStateChanged(async user=>{
+  if(!user){ showGate(); return; }
+  try{
+    const doc = await TEAM_MEMBERS.doc(user.email.toLowerCase()).get();
+    if(!doc.exists){
+      $('#gate-error').textContent = 'Your account isn\u2019t set up yet in Prep Deck. Ask your admin to add you under Admin / Team.';
+      firebase.auth().signOut();
+      return;
+    }
+    enterApp({ email: user.email.toLowerCase(), name: doc.data().name, team: doc.data().team });
+  }catch(err){
     console.error(err);
-    $('#conn-status').innerHTML = '<span class="conn-dot off"></span>Sign-in error';
-    toast('Could not authenticate. In the Firebase console, make sure Authentication → Sign-in method → Anonymous is enabled.', true);
-  });
+    toast('Could not load your profile. Check your connection.', true);
+  }
+});
 
-  firebase.auth().onAuthStateChanged(user=>{
-    if(!user) return;
-    if(ordersUnsub) return; // already listening
+function startSync(){
+  if(ordersUnsub) return; // already listening
 
-    ordersUnsub = ORDERS.orderBy('createdAt','desc').limit(3000)
-      .onSnapshot(snap => {
-        allOrders = snap.docs.map(d => ({id:d.id, ...d.data()}));
-        $('#conn-status').innerHTML = '<span class="conn-dot"></span>Live sync';
-        renderAll();
-      }, err => {
-        console.error(err);
-        $('#conn-status').innerHTML = '<span class="conn-dot off"></span>Connection error';
-        toast('Could not reach the database. Check firebase-config.js and your Firestore rules.', true);
-      });
+  ordersUnsub = ORDERS.orderBy('createdAt','desc').limit(3000)
+    .onSnapshot(snap => {
+      allOrders = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      $('#conn-status').innerHTML = '<span class="conn-dot"></span>Live sync';
+      renderAll();
+    }, err => {
+      console.error(err);
+      $('#conn-status').innerHTML = '<span class="conn-dot off"></span>Connection error';
+      toast('Could not reach the database. Check firebase-config.js and your Firestore rules.', true);
+    });
 
-    inventoryUnsub = INVENTORY.orderBy('createdAt','desc').limit(3000)
-      .onSnapshot(snap => {
-        allInventory = snap.docs.map(d => ({id:d.id, ...d.data()}));
-        renderAll();
-      }, err => console.error(err));
-  });
+  inventoryUnsub = INVENTORY.orderBy('createdAt','desc').limit(3000)
+    .onSnapshot(snap => {
+      allInventory = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      renderAll();
+    }, err => console.error(err));
+
+  if(currentUser.team === 'Admin'){
+    teamMembersUnsub = TEAM_MEMBERS.onSnapshot(snap=>{
+      allTeamMembers = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      renderTeamMembers();
+    }, err => console.error(err));
+  }
 }
 
 /* ===================== Nav ===================== */
@@ -174,7 +278,6 @@ function renderDashboard(){
   $('#stat-delivered').textContent = allOrders.filter(o=>o.deliveredAt && isToday(o.deliveredAt)).length;
   $('#stat-exception').textContent = allOrders.filter(o=>o.status==='Exception').length;
 
-  // marketplace mix, last 30 days
   const cutoff = Date.now() - 30*86400000;
   const recent = allOrders.filter(o=>o.createdAt >= cutoff);
   const mix = {};
@@ -184,7 +287,6 @@ function renderDashboard(){
     <div class="stat-card"><div class="num">${v}</div><div class="lbl">${k}</div></div>
   `).join('') : `<div style="color:var(--text-dim);font-size:13px;">No orders in the last 30 days yet.</div>`;
 
-  // storage snapshot
   const active = allInventory.filter(s=>s.status!=='Depleted' && s.status!=='Returned to Client');
   const clients = new Set(active.map(s=>s.client));
   const cartons = active.reduce((sum,s)=>sum + (s.cartonsRemaining||0), 0);
@@ -192,7 +294,6 @@ function renderDashboard(){
   $('#stat-storage-cartons').textContent = cartons;
   $('#stat-storage-batches').textContent = active.length;
 
-  // attention list
   const attention = allOrders.filter(o=>{
     if(o.status === 'Exception') return true;
     if(o.status === 'Order Received' && Date.now()-o.createdAt > 24*3600000) return true;
@@ -264,39 +365,56 @@ function renderKanban(){
   $('#wq-count-2').textContent = col2.length;
   $('#wq-count-3').textContent = col3.length;
 
-  const card = (o, actionLabel, actionFn) => `
+  const canAct = canSetStatus(currentUser.team, 'Label Acknowledged') || currentUser.team==='Admin';
+
+  const card = (o, actionLabel, actionFn, allowed) => `
     <div class="k-card" onclick="showDetail('${o.id}')">
       <div class="ref">${o.orderRef} ${o.priority==='Urgent'?'<span class="priority-urgent">● URGENT</span>':''}</div>
       <div class="prod">${o.productName} — ${o.client}</div>
       <div class="meta"><span class="pill-market">${marketplaceLabel(o)}</span><span class="mono" style="font-size:11px;color:var(--text-dim);">${timeAgo(o.createdAt)} ago</span></div>
-      <button class="quick" onclick="event.stopPropagation();${actionFn}('${o.id}')">${actionLabel}</button>
+      ${allowed ? `<button class="quick" onclick="event.stopPropagation();${actionFn}('${o.id}')">${actionLabel}</button>` : ''}
     </div>`;
 
-  $('#wq-col-1').innerHTML = col1.length ? col1.map(o=>card(o,'✓ Acknowledge Label','quickAck')).join('') : `<div style="color:var(--text-dim);font-size:12.5px;padding:10px;">Queue is clear.</div>`;
-  $('#wq-col-2').innerHTML = col2.length ? col2.map(o=>card(o,'✓ Mark Packed','quickPack')).join('') : `<div style="color:var(--text-dim);font-size:12.5px;padding:10px;">Nothing to pack.</div>`;
-  $('#wq-col-3').innerHTML = col3.length ? col3.map(o=>card(o,'🚚 Ship (add USPS #)','quickShip')).join('') : `<div style="color:var(--text-dim);font-size:12.5px;padding:10px;">Nothing ready to ship.</div>`;
+  const wAllowed = canAct;
+  $('#wq-col-1').innerHTML = col1.length ? col1.map(o=>card(o,'✓ Acknowledge Label','quickAck',wAllowed)).join('') : `<div style="color:var(--text-dim);font-size:12.5px;padding:10px;">Queue is clear.</div>`;
+  $('#wq-col-2').innerHTML = col2.length ? col2.map(o=>card(o,'✓ Mark Packed','quickPack',wAllowed)).join('') : `<div style="color:var(--text-dim);font-size:12.5px;padding:10px;">Nothing to pack.</div>`;
+  $('#wq-col-3').innerHTML = col3.length ? col3.map(o=>card(o,'🚚 Ship (add USPS #)','quickShip',wAllowed)).join('') : `<div style="color:var(--text-dim);font-size:12.5px;padding:10px;">Nothing ready to ship.</div>`;
 }
 
 async function quickAck(id){
-  await ORDERS.doc(id).update({
-    status:'Label Acknowledged', warehouseAckBy: currentUser.name, warehouseAckAt: Date.now(), updatedAt: Date.now()
-  });
-  toast('Label acknowledged.');
+  try{
+    await ORDERS.doc(id).update({
+      status:'Label Acknowledged', warehouseAckBy: currentUser.name, warehouseAckAt: Date.now(), updatedAt: Date.now()
+    });
+    toast('Label acknowledged.');
+  }catch(e){ permissionToast(e); }
 }
 async function quickPack(id){
-  await ORDERS.doc(id).update({
-    status:'Packed', packedBy: currentUser.name, packedAt: Date.now(), updatedAt: Date.now()
-  });
-  toast('Marked as packed.');
+  try{
+    await ORDERS.doc(id).update({
+      status:'Packed', packedBy: currentUser.name, packedAt: Date.now(), updatedAt: Date.now()
+    });
+    toast('Marked as packed.');
+  }catch(e){ permissionToast(e); }
 }
 async function quickShip(id){
   const tn = prompt('Enter the USPS tracking number for this package:');
   if(!tn) return;
-  await ORDERS.doc(id).update({
-    status:'Shipped', uspsTrackingNumber: tn.trim(), shippedBy: currentUser.name, shippedAt: Date.now(),
-    deliveryStatus:'In Transit', updatedAt: Date.now()
-  });
-  toast('Shipped — USPS tracking saved.');
+  try{
+    await ORDERS.doc(id).update({
+      status:'Shipped', uspsTrackingNumber: tn.trim(), shippedBy: currentUser.name, shippedAt: Date.now(),
+      deliveryStatus:'In Transit', updatedAt: Date.now()
+    });
+    toast('Shipped — USPS tracking saved.');
+  }catch(e){ permissionToast(e); }
+}
+function permissionToast(e){
+  console.error(e);
+  if(e.code === 'permission-denied'){
+    toast('Your team doesn\u2019t have permission to do that in Prep Deck.', true);
+  } else {
+    toast('Could not save that change. Check your connection.', true);
+  }
 }
 window.quickAck = quickAck; window.quickPack = quickPack; window.quickShip = quickShip;
 
@@ -387,8 +505,7 @@ $('#no-submit').addEventListener('click', async ()=>{
     $('#no-label-created-date').value = '';
     $('#no-marketplace-other-wrap').style.display = 'none';
   }catch(e){
-    console.error(e);
-    toast('Could not save the order. Check your connection.', true);
+    permissionToast(e);
   }
 });
 
@@ -427,22 +544,24 @@ function showDetail(id){
     </div>
   `).join('');
 
+  const team = currentUser.team;
   const actions = [];
-  if(o.status==='Order Received') actions.push(['✓ Acknowledge Label', ()=>quickAck(o.id).then(refreshDetail)]);
-  if(o.status==='Label Acknowledged') actions.push(['✓ Mark Packed', ()=>quickPack(o.id).then(refreshDetail)]);
-  if(o.status==='Packed') actions.push(['🚚 Add USPS Tracking & Ship', ()=>quickShip(o.id).then(refreshDetail)]);
+  if(o.status==='Order Received' && canSetStatus(team,'Label Acknowledged')) actions.push(['✓ Acknowledge Label', ()=>quickAck(o.id).then(refreshDetail)]);
+  if(o.status==='Label Acknowledged' && canSetStatus(team,'Packed')) actions.push(['✓ Mark Packed', ()=>quickPack(o.id).then(refreshDetail)]);
+  if(o.status==='Packed' && canSetStatus(team,'Shipped')) actions.push(['🚚 Add USPS Tracking & Ship', ()=>quickShip(o.id).then(refreshDetail)]);
   if(o.status==='Shipped'){
-    actions.push(['✓ Mark Delivered', ()=>updateStatus(o.id,{status:'Delivered', deliveryStatus:'Delivered', deliveredAt:Date.now()})]);
-    actions.push(['⚠ Mark Delivery Exception', ()=>updateStatus(o.id,{status:'Exception', deliveryStatus:'Exception'})]);
+    if(canSetStatus(team,'Delivered')) actions.push(['✓ Mark Delivered', ()=>updateStatus(o.id,{status:'Delivered', deliveryStatus:'Delivered', deliveredAt:Date.now()})]);
+    if(canSetStatus(team,'Exception')) actions.push(['⚠ Mark Delivery Exception', ()=>updateStatus(o.id,{status:'Exception', deliveryStatus:'Exception'})]);
   }
   if(o.status==='Exception'){
-    actions.push(['↺ Resolve → In Transit', ()=>updateStatus(o.id,{status:'Shipped', deliveryStatus:'In Transit'})]);
-    actions.push(['✓ Resolve → Delivered', ()=>updateStatus(o.id,{status:'Delivered', deliveryStatus:'Delivered', deliveredAt:Date.now()})]);
+    if(canSetStatus(team,'Shipped')) actions.push(['↺ Resolve → In Transit', ()=>updateStatus(o.id,{status:'Shipped', deliveryStatus:'In Transit'})]);
+    if(canSetStatus(team,'Delivered')) actions.push(['✓ Resolve → Delivered', ()=>updateStatus(o.id,{status:'Delivered', deliveryStatus:'Delivered', deliveredAt:Date.now()})]);
   }
-  if(o.status!=='Exception' && o.status!=='Delivered') actions.push(['🚩 Mark as Exception', ()=>updateStatus(o.id,{status:'Exception'})]);
+  if(o.status!=='Exception' && o.status!=='Delivered' && canSetStatus(team,'Exception')) actions.push(['🚩 Mark as Exception', ()=>updateStatus(o.id,{status:'Exception'})]);
 
   $('#dt-actions').innerHTML = actions.map((a,i)=>`<button data-i="${i}">${a[0]}</button>`).join('');
   $$('#dt-actions button').forEach((btn,i)=> btn.addEventListener('click', actions[i][1]) );
+  $('#dt-actions-note').style.display = (!actions.length && o.status!=='Delivered') ? 'block' : 'none';
 
   const notes = (o.notes||[]).slice().sort((a,b)=>b.createdAt-a.createdAt);
   $('#dt-notes').innerHTML = notes.length ? notes.map(n=>`
@@ -458,9 +577,11 @@ function showDetail(id){
 window.showDetail = showDetail;
 
 async function updateStatus(id, fields){
-  await ORDERS.doc(id).update({...fields, updatedAt: Date.now()});
-  toast('Order updated.');
-  refreshDetail();
+  try{
+    await ORDERS.doc(id).update({...fields, updatedAt: Date.now()});
+    toast('Order updated.');
+    refreshDetail();
+  }catch(e){ permissionToast(e); }
 }
 function refreshDetail(){
   if(detailOrderId) setTimeout(()=>showDetail(detailOrderId), 250);
@@ -474,10 +595,12 @@ async function addNoteToOrder(type){
   const note = {id:'n'+Date.now(), text, author:currentUser.name, team:currentUser.team, type, createdAt:Date.now()};
   const updates = { notes: [...(o.notes||[]), note], updatedAt: Date.now() };
   if(type==='issue') updates.flaggedIssue = true;
-  await ORDERS.doc(o.id).update(updates);
-  $('#dt-note-text').value = '';
-  toast(type==='issue' ? 'Issue flagged.' : type==='whatsapp' ? 'WhatsApp message logged.' : 'Note added.');
-  refreshDetail();
+  try{
+    await ORDERS.doc(o.id).update(updates);
+    $('#dt-note-text').value = '';
+    toast(type==='issue' ? 'Issue flagged.' : type==='whatsapp' ? 'WhatsApp message logged.' : 'Note added.');
+    refreshDetail();
+  }catch(e){ permissionToast(e); }
 }
 $('#dt-add-note').addEventListener('click', ()=>addNoteToOrder('note'));
 $('#dt-add-whatsapp').addEventListener('click', ()=>addNoteToOrder('whatsapp'));
@@ -515,6 +638,8 @@ function renderStorage(){
       <td data-label="Status"><span class="tag ${STORAGE_STATUS_CLASS[s.status]}">${s.status}</span></td>
     </tr>
   `).join('');
+
+  $('#open-new-stock').style.display = canManageStorage(currentUser.team) ? 'inline-flex' : 'none';
 }
 ['st-client-filter','st-status-filter'].forEach(id=>$('#'+id).addEventListener('change', renderStorage));
 
@@ -559,8 +684,7 @@ $('#st-submit').addEventListener('click', async ()=>{
     $('#st-units-per-carton').value = '';
     $('#st-date-received').value = '';
   }catch(e){
-    console.error(e);
-    toast('Could not save the stock intake. Check your connection.', true);
+    permissionToast(e);
   }
 });
 
@@ -593,6 +717,13 @@ function showStockDetail(id){
 
   $('#sd-adjust-qty').value = '';
   $('#sd-adjust-reason').value = '';
+
+  const canManage = canManageStorage(currentUser.team);
+  $$('#sd-apply-adjust, #sd-mark-depleted, #sd-mark-returned').forEach(()=>{});
+  ['sd-apply-adjust','sd-mark-depleted','sd-mark-returned'].forEach(id=>{
+    $('#'+id).style.display = canManage ? 'inline-flex' : 'none';
+  });
+
   openModal('modal-stock-detail');
 }
 window.showStockDetail = showStockDetail;
@@ -611,27 +742,79 @@ $('#sd-apply-adjust').addEventListener('click', async ()=>{
   else newStatus = 'In Storage';
 
   const adj = {id:'a'+Date.now(), delta, reason, by: currentUser.name, at: Date.now()};
-  await INVENTORY.doc(s.id).update({
-    cartonsRemaining: newRemaining, status: newStatus,
-    adjustments: [...(s.adjustments||[]), adj], updatedAt: Date.now()
-  });
-  toast('Stock adjusted.');
-  setTimeout(()=>showStockDetail(s.id), 250);
+  try{
+    await INVENTORY.doc(s.id).update({
+      cartonsRemaining: newRemaining, status: newStatus,
+      adjustments: [...(s.adjustments||[]), adj], updatedAt: Date.now()
+    });
+    toast('Stock adjusted.');
+    setTimeout(()=>showStockDetail(s.id), 250);
+  }catch(e){ permissionToast(e); }
 });
 $('#sd-mark-depleted').addEventListener('click', async ()=>{
   const s = allInventory.find(x=>x.id===detailStockId);
   if(!s) return;
-  await INVENTORY.doc(s.id).update({status:'Depleted', updatedAt: Date.now()});
-  toast('Marked depleted.');
-  setTimeout(()=>showStockDetail(s.id), 250);
+  try{
+    await INVENTORY.doc(s.id).update({status:'Depleted', updatedAt: Date.now()});
+    toast('Marked depleted.');
+    setTimeout(()=>showStockDetail(s.id), 250);
+  }catch(e){ permissionToast(e); }
 });
 $('#sd-mark-returned').addEventListener('click', async ()=>{
   const s = allInventory.find(x=>x.id===detailStockId);
   if(!s) return;
-  await INVENTORY.doc(s.id).update({status:'Returned to Client', updatedAt: Date.now()});
-  toast('Marked returned to client.');
-  setTimeout(()=>showStockDetail(s.id), 250);
+  try{
+    await INVENTORY.doc(s.id).update({status:'Returned to Client', updatedAt: Date.now()});
+    toast('Marked returned to client.');
+    setTimeout(()=>showStockDetail(s.id), 250);
+  }catch(e){ permissionToast(e); }
 });
+
+/* ===================== ADMIN / TEAM MEMBERS ===================== */
+function renderTeamMembers(){
+  if(currentUser.team !== 'Admin') return;
+  $('#tm-body').innerHTML = allTeamMembers.map(m=>`
+    <tr>
+      <td data-label="Email" class="mono">${m.id}</td>
+      <td data-label="Name">${m.name}</td>
+      <td data-label="Team"><span class="pill-market">${m.team}</span></td>
+      <td data-label=""><button class="row-btn-sm" onclick="deleteTeamMember('${m.id}')">Remove</button></td>
+    </tr>
+  `).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--text-dim);padding:20px;">No team members added yet.</td></tr>`;
+}
+
+$('#tm-submit').addEventListener('click', async ()=>{
+  const email = $('#tm-email').value.trim().toLowerCase();
+  const name = $('#tm-name').value.trim();
+  const team = $('#tm-team').value;
+  $('#tm-error').textContent = '';
+  if(!email || !name){ $('#tm-error').textContent = 'Enter both an email and a name.'; return; }
+  if(!/^\S+@\S+\.\S+$/.test(email)){ $('#tm-error').textContent = 'That email address doesn\u2019t look right.'; return; }
+
+  try{
+    await TEAM_MEMBERS.doc(email).set({ name, team, updatedAt: Date.now() });
+    toast('Saved '+name+' ('+team+'). Remember to also create their login in the Firebase console if you haven\u2019t yet.');
+    $('#tm-email').value=''; $('#tm-name').value='';
+  }catch(e){
+    console.error(e);
+    $('#tm-error').textContent = e.code==='permission-denied' ? 'Only Admin accounts can manage team members.' : 'Could not save. Check your connection.';
+  }
+});
+
+async function deleteTeamMember(email){
+  if(email === currentUser.email){
+    toast('You can\u2019t remove your own account from here.', true);
+    return;
+  }
+  if(!confirm('Remove '+email+' from Prep Deck? Their Firebase login will still exist until you also delete it in the Firebase console.')) return;
+  try{
+    await TEAM_MEMBERS.doc(email).delete();
+    toast('Removed.');
+  }catch(e){
+    permissionToast(e);
+  }
+}
+window.deleteTeamMember = deleteTeamMember;
 
 /* ===================== Global search ===================== */
 $('#global-search').addEventListener('keydown', async (e)=>{
