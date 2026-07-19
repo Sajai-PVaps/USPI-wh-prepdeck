@@ -15,4 +15,8 @@ const firebaseConfig = {
 };
 
 /*
-
+  There is no shared access code anymore. Every teammate signs in with their
+  own email + password, created for them in the Firebase console, with their
+  name/team assigned in the app's Admin panel. See README.md -> "Setting up
+  your team" for the full walkthrough.
+*/
