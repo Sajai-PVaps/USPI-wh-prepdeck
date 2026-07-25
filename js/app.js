@@ -4,15 +4,21 @@ const db = firebase.firestore();
 const ORDERS = db.collection('orders');
 const INVENTORY = db.collection('inventory');
 const TEAM_MEMBERS = db.collection('team_members');
+const PRODUCTS = db.collection('products');
+const CLIENTS = db.collection('clients');
 
 /* ===================== State ===================== */
 let allOrders = [];
 let allInventory = [];
 let allTeamMembers = [];
+let allProducts = [];
+let allClients = [];
 let currentUser = null;   // {email, name, team}
 let ordersUnsub = null;
 let inventoryUnsub = null;
 let teamMembersUnsub = null;
+let productsUnsub = null;
+let clientsUnsub = null;
 
 const STATUSES = ["Order Received","Label Acknowledged","Packed","Shipped","Delivered","Exception"];
 const STATUS_CLASS = {
@@ -38,6 +44,10 @@ function canSetStatus(team, status){
 }
 function canCreateOrders(team){ return team==='Order Intake' || team==='Admin'; }
 function canManageStorage(team){ return team==='Warehouse' || team==='Admin'; }
+function canAddProducts(team){ return team==='Order Intake' || team==='Admin'; }
+function canDeleteProducts(team){ return team==='Admin'; }
+function canAddClients(team){ return team==='Order Intake' || team==='Admin'; }
+function canDeleteClients(team){ return team==='Admin'; }
 
 /* ===================== Helpers ===================== */
 const $ = s => document.querySelector(s);
@@ -85,6 +95,27 @@ function openModal(id){ $('#'+id).classList.add('active'); }
 function closeModal(id){ $('#'+id).classList.remove('active'); }
 function marketplaceLabel(o){
   return o.marketplace === 'Other' && o.marketplaceOther ? 'Other: '+o.marketplaceOther : o.marketplace;
+}
+
+// Uploads one file to Cloudinary (free tier, no billing account needed) and
+// resolves to its public HTTPS URL. `folder` is just for organizing files in
+// your Cloudinary dashboard — purely cosmetic, doesn't affect access.
+async function uploadFile(file, folder){
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+  formData.append('folder', folder);
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`, {
+    method: 'POST',
+    body: formData
+  });
+  if(!res.ok){
+    const errText = await res.text().catch(()=> '');
+    console.error('Cloudinary upload failed:', res.status, errText);
+    throw new Error('upload-failed');
+  }
+  const data = await res.json();
+  return data.secure_url;
 }
 
 /* ===================== Login gate (real per-person accounts) ===================== */
@@ -173,6 +204,8 @@ function enterApp(profile){
   $('#nav-admin').style.display = currentUser.team === 'Admin' ? 'flex' : 'none';
   $('#open-new-order').style.display = canCreateOrders(currentUser.team) ? 'flex' : 'none';
   $('#fab-new-order').style.display = canCreateOrders(currentUser.team) ? 'flex' : 'none';
+  $('#open-new-product').style.display = canAddProducts(currentUser.team) ? 'inline-flex' : 'none';
+  $('#open-new-client').style.display = canAddClients(currentUser.team) ? 'inline-flex' : 'none';
   startSync();
 }
 
@@ -185,8 +218,10 @@ function doSignOut(){
   if(ordersUnsub) ordersUnsub();
   if(inventoryUnsub) inventoryUnsub();
   if(teamMembersUnsub) teamMembersUnsub();
-  ordersUnsub = inventoryUnsub = teamMembersUnsub = null;
-  allOrders = []; allInventory = []; allTeamMembers = [];
+  if(productsUnsub) productsUnsub();
+  if(clientsUnsub) clientsUnsub();
+  ordersUnsub = inventoryUnsub = teamMembersUnsub = productsUnsub = clientsUnsub = null;
+  allOrders = []; allInventory = []; allTeamMembers = []; allProducts = []; allClients = [];
   firebase.auth().signOut();
 }
 $('#switch-user').addEventListener('click', doSignOut);
@@ -235,6 +270,20 @@ function startSync(){
     .onSnapshot(snap => {
       allInventory = snap.docs.map(d => ({id:d.id, ...d.data()}));
       renderAll();
+    }, err => console.error(err));
+
+  productsUnsub = PRODUCTS.orderBy('name')
+    .onSnapshot(snap => {
+      allProducts = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      refreshProductDropdown();
+      renderProducts();
+    }, err => console.error(err));
+
+  clientsUnsub = CLIENTS.orderBy('name')
+    .onSnapshot(snap => {
+      allClients = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      refreshClientDropdowns();
+      renderClients();
     }, err => console.error(err));
 
   if(currentUser.team === 'Admin'){
@@ -342,8 +391,7 @@ function renderOrdersTable(){
     <tr onclick="showDetail('${o.id}')">
       <td data-label="Order Ref" class="mono">${o.orderRef}</td>
       <td data-label="Marketplace"><span class="pill-market">${marketplaceLabel(o)}</span></td>
-      <td data-label="Client">${o.client}${o.priority==='Urgent'?' <span class="priority-urgent">● URGENT</span>':''}</td>
-      <td data-label="Delivery Location">${o.deliveryLocation||'—'}</td>
+      <td data-label="Client">${o.client}</td>
       <td data-label="Product">${o.productName}${o.quantity>1?' ×'+o.quantity:''}</td>
       <td data-label="Label Created" class="mono">${o.labelCreatedDate ? fmtDate(o.labelCreatedDate) : '—'}</td>
       <td data-label="Label Tracking">${o.labelTrackingId ? `<span class="code-chip">${o.labelTrackingId}</span>` : '—'}</td>
@@ -369,7 +417,7 @@ function renderKanban(){
 
   const card = (o, actionLabel, actionFn, allowed) => `
     <div class="k-card" onclick="showDetail('${o.id}')">
-      <div class="ref">${o.orderRef} ${o.priority==='Urgent'?'<span class="priority-urgent">● URGENT</span>':''}</div>
+      <div class="ref">${o.orderRef}</div>
       <div class="prod">${o.productName} — ${o.client}</div>
       <div class="meta"><span class="pill-market">${marketplaceLabel(o)}</span><span class="mono" style="font-size:11px;color:var(--text-dim);">${timeAgo(o.createdAt)} ago</span></div>
       ${allowed ? `<button class="quick" onclick="event.stopPropagation();${actionFn}('${o.id}')">${actionLabel}</button>` : ''}
@@ -446,6 +494,173 @@ function renderComms(){
   `).join('');
 }
 
+/* ===================== PRODUCT CATALOG ===================== */
+function renderProducts(){
+  const term = ($('#pr-search').value || '').trim().toLowerCase();
+  let list = allProducts.filter(p =>
+    !term || p.name.toLowerCase().includes(term) || (p.identifier||'').toLowerCase().includes(term)
+  );
+
+  $('#products-empty').style.display = list.length ? 'none' : 'block';
+  const canDelete = canDeleteProducts(currentUser.team);
+  $('#products-body').innerHTML = list.map(p=>`
+    <tr>
+      <td data-label="Product Name">${p.name}</td>
+      <td data-label="Product ID" class="mono">${p.identifier}</td>
+      <td data-label="Added By">${p.addedBy||'—'}</td>
+      <td data-label="Date Added" class="mono">${fmtDate(p.createdAt)}</td>
+      <td data-label="">${canDelete ? `<button class="row-btn-sm" onclick="deleteProduct('${p.id}')">Remove</button>` : ''}</td>
+    </tr>
+  `).join('');
+
+  $('#open-new-product').style.display = canAddProducts(currentUser.team) ? 'inline-flex' : 'none';
+}
+$('#pr-search').addEventListener('input', renderProducts);
+
+async function deleteProduct(id){
+  if(!confirm('Remove this product from the catalog? Past orders that used it keep their own saved copy of the name/ID, so this is safe.')) return;
+  try{
+    await PRODUCTS.doc(id).delete();
+    toast('Product removed.');
+  }catch(e){ permissionToast(e); }
+}
+window.deleteProduct = deleteProduct;
+
+// Populates the New Order product dropdown from the live catalog. Called
+// whenever the products list changes.
+function refreshProductDropdown(){
+  const sel = $('#no-product-select');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Select a product...</option>' +
+    allProducts.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
+  if(current && allProducts.some(p=>p.id===current)) sel.value = current;
+  showProductIdHint();
+}
+function showProductIdHint(){
+  const p = allProducts.find(x=>x.id===$('#no-product-select').value);
+  $('#no-product-id-hint').textContent = p ? 'Product ID: '+p.identifier : '';
+}
+$('#no-product-select').addEventListener('change', showProductIdHint);
+
+// The "add it to the catalog" link inside New Order, and the dedicated
+// button on the Products tab, both open the same modal — this tracks which
+// one so we know whether to auto-select the new product afterward.
+let productModalSource = 'products';
+$('#no-product-add-link').addEventListener('click', (e)=>{
+  e.preventDefault();
+  productModalSource = 'neworder';
+  $('#pr-name').value = ''; $('#pr-identifier').value = ''; $('#pr-error').textContent = '';
+  openModal('modal-product');
+});
+$('#open-new-product').addEventListener('click', ()=>{
+  productModalSource = 'products';
+  $('#pr-name').value = ''; $('#pr-identifier').value = ''; $('#pr-error').textContent = '';
+  openModal('modal-product');
+});
+
+$('#pr-submit').addEventListener('click', async ()=>{
+  const name = $('#pr-name').value.trim();
+  const identifier = $('#pr-identifier').value.trim();
+  $('#pr-error').textContent = '';
+  if(!name || !identifier){ $('#pr-error').textContent = 'Enter both a product name and a product ID.'; return; }
+
+  const productId = genRef('PRD');
+  try{
+    await PRODUCTS.doc(productId).set({
+      name, identifier, addedBy: currentUser.name, addedByTeam: currentUser.team, createdAt: Date.now()
+    });
+    toast('Product added to catalog.');
+    closeModal('modal-product');
+    if(productModalSource === 'neworder'){
+      // give the snapshot listener a moment to deliver the new doc, then select it
+      setTimeout(()=>{
+        const match = allProducts.find(p=>p.name===name && p.identifier===identifier);
+        if(match){ $('#no-product-select').value = match.id; showProductIdHint(); }
+      }, 400);
+    }
+  }catch(e){
+    console.error(e);
+    $('#pr-error').textContent = e.code==='permission-denied' ? 'Your team doesn\u2019t have permission to add products.' : 'Could not save. Check your connection.';
+  }
+});
+
+/* ===================== CLIENT CATALOG ===================== */
+function renderClients(){
+  const term = ($('#cl-search').value || '').trim().toLowerCase();
+  let list = allClients.filter(c => !term || c.name.toLowerCase().includes(term));
+
+  $('#clients-empty').style.display = list.length ? 'none' : 'block';
+  const canDelete = canDeleteClients(currentUser.team);
+  $('#clients-body').innerHTML = list.map(c=>`
+    <tr>
+      <td data-label="Client Name">${c.name}</td>
+      <td data-label="Added By">${c.addedBy||'—'}</td>
+      <td data-label="Date Added" class="mono">${fmtDate(c.createdAt)}</td>
+      <td data-label="">${canDelete ? `<button class="row-btn-sm" onclick="deleteClient('${c.id}')">Remove</button>` : ''}</td>
+    </tr>
+  `).join('');
+
+  $('#open-new-client').style.display = canAddClients(currentUser.team) ? 'inline-flex' : 'none';
+}
+$('#cl-search').addEventListener('input', renderClients);
+
+async function deleteClient(id){
+  if(!confirm('Remove this client from the catalog? Past orders and stock batches keep their own saved copy of the name, so this is safe.')) return;
+  try{
+    await CLIENTS.doc(id).delete();
+    toast('Client removed.');
+  }catch(e){ permissionToast(e); }
+}
+window.deleteClient = deleteClient;
+
+// Populates both the New Order and Storage Intake client dropdowns from the
+// live catalog. Called whenever the clients list changes.
+function refreshClientDropdowns(){
+  ['no-client-select','st-client-select'].forEach(id=>{
+    const sel = $('#'+id);
+    if(!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Select a client...</option>' +
+      allClients.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
+    if(current && allClients.some(c=>c.id===current)) sel.value = current;
+  });
+}
+
+// Tracks which form's "add a client" link opened the modal, so we know
+// which dropdown to auto-select the new client in afterward.
+let clientModalSource = 'clients';
+function openAddClientModal(source){
+  clientModalSource = source;
+  $('#cl-name').value = ''; $('#cl-error').textContent = '';
+  openModal('modal-client');
+}
+$('#open-new-client').addEventListener('click', ()=>openAddClientModal('clients'));
+$('#no-client-add-link').addEventListener('click', (e)=>{ e.preventDefault(); openAddClientModal('neworder'); });
+$('#st-client-add-link').addEventListener('click', (e)=>{ e.preventDefault(); openAddClientModal('stock'); });
+
+$('#cl-submit').addEventListener('click', async ()=>{
+  const name = $('#cl-name').value.trim();
+  $('#cl-error').textContent = '';
+  if(!name){ $('#cl-error').textContent = 'Enter a client name.'; return; }
+
+  const clientId = genRef('CLT');
+  try{
+    await CLIENTS.doc(clientId).set({ name, addedBy: currentUser.name, addedByTeam: currentUser.team, createdAt: Date.now() });
+    toast('Client added.');
+    closeModal('modal-client');
+    if(clientModalSource === 'neworder' || clientModalSource === 'stock'){
+      const targetSelect = clientModalSource === 'neworder' ? '#no-client-select' : '#st-client-select';
+      setTimeout(()=>{
+        const match = allClients.find(c=>c.name===name);
+        if(match) $(targetSelect).value = match.id;
+      }, 400);
+    }
+  }catch(e){
+    console.error(e);
+    $('#cl-error').textContent = e.code==='permission-denied' ? 'Your team doesn\u2019t have permission to add clients.' : 'Could not save. Check your connection.';
+  }
+});
+
 /* ===================== New Order modal ===================== */
 $('#open-new-order').addEventListener('click', ()=>openModal('modal-new'));
 $$('[data-close]').forEach(b=>b.addEventListener('click', ()=>closeModal(b.dataset.close)));
@@ -454,58 +669,92 @@ $('#no-marketplace').addEventListener('change', ()=>{
   $('#no-marketplace-other-wrap').style.display = $('#no-marketplace').value==='Other' ? 'block' : 'none';
 });
 
+$('#no-label-file').addEventListener('change', ()=>{
+  const f = $('#no-label-file').files[0];
+  if(!f){ $('#no-label-file-status').textContent = ''; return; }
+  if(f.type !== 'application/pdf'){
+    $('#no-label-file-status').textContent = 'Please choose a PDF file.';
+    $('#no-label-file').value = '';
+    return;
+  }
+  if(f.size > 15*1024*1024){
+    $('#no-label-file-status').textContent = 'That file is too large (max 15MB).';
+    $('#no-label-file').value = '';
+    return;
+  }
+  $('#no-label-file-status').textContent = 'Selected: ' + f.name;
+});
+
 $('#no-submit').addEventListener('click', async ()=>{
-  const client = $('#no-client').value.trim();
-  const deliveryLocation = $('#no-delivery-location').value.trim();
-  const product = $('#no-product').value.trim();
+  const clientId = $('#no-client-select').value;
+  const productId = $('#no-product-select').value;
   const labelTracking = $('#no-label-tracking').value.trim();
   const marketplace = $('#no-marketplace').value;
   const marketplaceOther = $('#no-marketplace-other').value.trim();
   const labelCreatedDate = dateInputToMs($('#no-label-created-date').value);
+  const labelFile = $('#no-label-file').files[0];
 
-  if(!client || !deliveryLocation || !product || !labelTracking || !labelCreatedDate){
-    toast('Fill in client, delivery location, product, label creation date, and label tracking ID.', true);
+  if(!clientId || !productId || !labelTracking || !labelCreatedDate || !labelFile){
+    toast('Fill in client, product, label creation date, label tracking ID, and upload the shipping label PDF.', true);
     return;
   }
   if(marketplace==='Other' && !marketplaceOther){
     toast('Specify the marketplace name.', true);
     return;
   }
+  const client = allClients.find(c=>c.id===clientId);
+  if(!client){ toast('Select a valid client from the list.', true); return; }
+  const product = allProducts.find(p=>p.id===productId);
+  if(!product){ toast('Select a valid product from the list.', true); return; }
 
   const orderRef = genRef('ORD');
-  const notes = [];
-  const noteText = $('#no-notes').value.trim();
-  if(noteText) notes.push({id:'n'+Date.now(), text:noteText, author:currentUser.name, team:currentUser.team, type:'note', createdAt:Date.now()});
+  const submitBtn = $('#no-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Uploading label...';
 
-  const order = {
-    orderRef,
-    marketplace,
-    marketplaceOther: marketplace==='Other' ? marketplaceOther : '',
-    client,
-    deliveryLocation,
-    productName: product,
-    quantity: Number($('#no-qty').value)||1,
-    priority: $('#no-priority').value,
-    labelCreatedDate,
-    labelTrackingId: labelTracking,
-    labelUrl: $('#no-label-url').value.trim(),
-    status: 'Order Received',
-    intakeBy: currentUser.name,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    deliveryStatus: 'Pending',
-    notes
-  };
   try{
+    const labelFileUrl = await uploadFile(labelFile, 'shipping-labels/'+orderRef);
+
+    const notes = [];
+    const noteText = $('#no-notes').value.trim();
+    if(noteText) notes.push({id:'n'+Date.now(), text:noteText, author:currentUser.name, team:currentUser.team, type:'note', createdAt:Date.now()});
+
+    const order = {
+      orderRef,
+      marketplace,
+      marketplaceOther: marketplace==='Other' ? marketplaceOther : '',
+      client: client.name,
+      productName: product.name,
+      productIdentifier: product.identifier,
+      quantity: Number($('#no-qty').value)||1,
+      labelCreatedDate,
+      labelTrackingId: labelTracking,
+      labelFileUrl,
+      labelFileName: labelFile.name,
+      status: 'Order Received',
+      intakeBy: currentUser.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      deliveryStatus: 'Pending',
+      notes
+    };
     await ORDERS.doc(orderRef).set(order);
     toast('Order '+orderRef+' created.');
     closeModal('modal-new');
-    ['no-client','no-delivery-location','no-product','no-label-tracking','no-label-url','no-notes','no-marketplace-other'].forEach(id=>$('#'+id).value='');
+    ['no-label-tracking','no-notes','no-marketplace-other'].forEach(id=>$('#'+id).value='');
     $('#no-qty').value = 1;
     $('#no-label-created-date').value = '';
+    $('#no-label-file').value = '';
+    $('#no-label-file-status').textContent = '';
+    $('#no-client-select').value = '';
+    $('#no-product-select').value = '';
+    $('#no-product-id-hint').textContent = '';
     $('#no-marketplace-other-wrap').style.display = 'none';
   }catch(e){
     permissionToast(e);
+  }finally{
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Create Order';
   }
 });
 
@@ -520,12 +769,14 @@ function showDetail(id){
   $('#dt-ref').textContent = o.orderRef;
   $('#dt-marketplace').innerHTML = `<span class="pill-market">${marketplaceLabel(o)}</span>`;
   $('#dt-client').textContent = o.client;
-  $('#dt-delivery-location').textContent = o.deliveryLocation || '—';
-  $('#dt-priority').innerHTML = o.priority==='Urgent' ? '<span class="priority-urgent">● URGENT</span>' : 'Normal';
   $('#dt-product').textContent = o.productName + (o.quantity ? ' · Qty '+o.quantity : '');
+  $('#dt-product-id').textContent = o.productIdentifier || '—';
   $('#dt-label-created').textContent = o.labelCreatedDate ? fmtDate(o.labelCreatedDate) : '—';
   $('#dt-label-tracking').textContent = o.labelTrackingId || '—';
   $('#dt-usps').textContent = o.uspsTrackingNumber || '—';
+  $('#dt-label-file').innerHTML = o.labelFileUrl
+    ? `<a href="${o.labelFileUrl}" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600;">📄 View PDF</a>`
+    : '—';
 
   $('#dt-status-row').innerHTML = `<span class="tag ${STATUS_CLASS[o.status]}" style="font-size:12px;padding:6px 12px;">${o.status}</span>
     ${o.deliveryStatus ? `<span class="tag outline" style="color:var(--text-dim);">USPS: ${o.deliveryStatus}</span>` : ''}`;
@@ -645,46 +896,80 @@ function renderStorage(){
 
 $('#open-new-stock').addEventListener('click', ()=>openModal('modal-stock'));
 
+$('#st-photos').addEventListener('change', ()=>{
+  const files = Array.from($('#st-photos').files);
+  if(!files.length){ $('#st-photos-status').textContent = ''; return; }
+  const tooBig = files.find(f=>f.size > 8*1024*1024);
+  const notImage = files.find(f=>!f.type.startsWith('image/'));
+  if(tooBig || notImage){
+    $('#st-photos-status').textContent = notImage ? 'Only image files are allowed.' : 'Each photo must be under 8MB.';
+    $('#st-photos').value = '';
+    return;
+  }
+  $('#st-photos-status').textContent = files.length + ' photo(s) selected.';
+});
+
 $('#st-submit').addEventListener('click', async ()=>{
-  const client = $('#st-client').value.trim();
+  const clientId = $('#st-client-select').value;
   const product = $('#st-product').value.trim();
   const cartons = Number($('#st-cartons').value);
   const dateReceived = dateInputToMs($('#st-date-received').value);
+  const photoFiles = Array.from($('#st-photos').files);
 
-  if(!client || !product || !cartons || cartons < 1 || !dateReceived){
+  if(!clientId || !product || !cartons || cartons < 1 || !dateReceived){
     toast('Fill in client, product, cartons received, and date received.', true);
     return;
   }
+  const client = allClients.find(c=>c.id===clientId);
+  if(!client){ toast('Select a valid client from the list.', true); return; }
 
   const invRef = genRef('INV');
-  const batch = {
-    invRef,
-    client,
-    productName: product,
-    productRef: $('#st-product-ref').value.trim(),
-    cartonsReceived: cartons,
-    cartonsRemaining: cartons,
-    unitsPerCarton: Number($('#st-units-per-carton').value) || null,
-    dateReceived,
-    warehouseLocation: $('#st-location').value.trim(),
-    condition: $('#st-condition').value,
-    notes: $('#st-notes').value.trim(),
-    status: 'In Storage',
-    receivedBy: currentUser.name,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    adjustments: []
-  };
+  const submitBtn = $('#st-submit');
+  submitBtn.disabled = true;
+
   try{
+    const photos = [];
+    for(let i=0; i<photoFiles.length; i++){
+      submitBtn.textContent = 'Uploading photo '+(i+1)+' of '+photoFiles.length+'...';
+      const f = photoFiles[i];
+      const url = await uploadFile(f, 'inventory-photos/'+invRef);
+      photos.push({url, name:f.name, uploadedBy:currentUser.name, uploadedAt:Date.now()});
+    }
+
+    const batch = {
+      invRef,
+      client: client.name,
+      productName: product,
+      productRef: $('#st-product-ref').value.trim(),
+      cartonsReceived: cartons,
+      cartonsRemaining: cartons,
+      unitsPerCarton: Number($('#st-units-per-carton').value) || null,
+      dateReceived,
+      warehouseLocation: $('#st-location').value.trim(),
+      condition: $('#st-condition').value,
+      notes: $('#st-notes').value.trim(),
+      status: 'In Storage',
+      receivedBy: currentUser.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      adjustments: [],
+      photos
+    };
     await INVENTORY.doc(invRef).set(batch);
     toast('Stock intake logged: '+invRef);
     closeModal('modal-stock');
-    ['st-client','st-product','st-product-ref','st-location','st-notes'].forEach(id=>$('#'+id).value='');
+    ['st-product','st-product-ref','st-location','st-notes'].forEach(id=>$('#'+id).value='');
+    $('#st-client-select').value = '';
     $('#st-cartons').value = 1;
     $('#st-units-per-carton').value = '';
     $('#st-date-received').value = '';
+    $('#st-photos').value = '';
+    $('#st-photos-status').textContent = '';
   }catch(e){
     permissionToast(e);
+  }finally{
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Log Intake';
   }
 });
 
@@ -707,6 +992,13 @@ function showStockDetail(id){
   $('#sd-condition').textContent = s.condition || '—';
   $('#sd-received-by').textContent = s.receivedBy || '—';
 
+  const photos = s.photos || [];
+  $('#sd-photos').innerHTML = photos.length
+    ? photos.map(p=>`<a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" alt="${p.name||'stock photo'}" loading="lazy"></a>`).join('')
+    : '';
+  if(!photos.length) $('#sd-photos').innerHTML = '<div class="photo-empty">No photos uploaded yet.</div>';
+  $('#sd-add-photos').value = '';
+
   const hist = (s.adjustments||[]).slice().sort((a,b)=>b.at-a.at);
   $('#sd-history').innerHTML = hist.length ? hist.map(a=>`
     <div class="note">
@@ -719,10 +1011,11 @@ function showStockDetail(id){
   $('#sd-adjust-reason').value = '';
 
   const canManage = canManageStorage(currentUser.team);
-  $$('#sd-apply-adjust, #sd-mark-depleted, #sd-mark-returned').forEach(()=>{});
   ['sd-apply-adjust','sd-mark-depleted','sd-mark-returned'].forEach(id=>{
     $('#'+id).style.display = canManage ? 'inline-flex' : 'none';
   });
+  $('#sd-add-photos').style.display = canManage ? 'inline-block' : 'none';
+  $('#sd-upload-photos').style.display = canManage ? 'inline-flex' : 'none';
 
   openModal('modal-stock-detail');
 }
@@ -768,6 +1061,39 @@ $('#sd-mark-returned').addEventListener('click', async ()=>{
     toast('Marked returned to client.');
     setTimeout(()=>showStockDetail(s.id), 250);
   }catch(e){ permissionToast(e); }
+});
+
+$('#sd-upload-photos').addEventListener('click', async ()=>{
+  const s = allInventory.find(x=>x.id===detailStockId);
+  if(!s) return;
+  const files = Array.from($('#sd-add-photos').files);
+  if(!files.length){ toast('Choose at least one photo first.', true); return; }
+  const tooBig = files.find(f=>f.size > 8*1024*1024);
+  const notImage = files.find(f=>!f.type.startsWith('image/'));
+  if(tooBig || notImage){
+    toast(notImage ? 'Only image files are allowed.' : 'Each photo must be under 8MB.', true);
+    return;
+  }
+
+  const btn = $('#sd-upload-photos');
+  btn.disabled = true;
+  try{
+    const newPhotos = [];
+    for(let i=0; i<files.length; i++){
+      btn.textContent = 'Uploading '+(i+1)+'/'+files.length+'...';
+      const f = files[i];
+      const url = await uploadFile(f, 'inventory-photos/'+s.invRef);
+      newPhotos.push({url, name:f.name, uploadedBy:currentUser.name, uploadedAt:Date.now()});
+    }
+    await INVENTORY.doc(s.id).update({ photos: [...(s.photos||[]), ...newPhotos], updatedAt: Date.now() });
+    toast('Photo(s) added.');
+    setTimeout(()=>showStockDetail(s.id), 250);
+  }catch(e){
+    permissionToast(e);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = 'Upload';
+  }
 });
 
 /* ===================== ADMIN / TEAM MEMBERS ===================== */
@@ -823,7 +1149,7 @@ $('#global-search').addEventListener('keydown', async (e)=>{
   if(!term) return;
 
   let match = allOrders.find(o =>
-    o.orderRef===term || o.deliveryLocation===term || o.labelTrackingId===term || o.uspsTrackingNumber===term
+    o.orderRef===term || o.labelTrackingId===term || o.uspsTrackingNumber===term || o.productIdentifier===term
   );
 
   if(!match){
@@ -863,13 +1189,13 @@ $('#rep-export').addEventListener('click', ()=>{
 
   if(!rows.length){ toast('No orders match those filters.', true); return; }
 
-  const headers = ['Order Ref','Marketplace','Client','Delivery Location','Product','Qty','Priority',
-    'Label Created','Label Tracking ID','USPS Tracking','Status','Delivery Status','Intake By','Received At',
+  const headers = ['Order Ref','Marketplace','Client','Product','Product ID','Qty',
+    'Label Created','Label Tracking ID','Shipping Label File','USPS Tracking','Status','Delivery Status','Intake By','Received At',
     'Ack By','Ack At','Packed By','Packed At','Shipped By','Shipped At','Delivered At'];
   const csvRows = [headers.join(',')];
   rows.forEach(o=>{
-    const line = [o.orderRef,marketplaceLabel(o),o.client,o.deliveryLocation,o.productName,o.quantity,o.priority,
-      fmtDate(o.labelCreatedDate),o.labelTrackingId,o.uspsTrackingNumber,o.status,o.deliveryStatus,o.intakeBy,
+    const line = [o.orderRef,marketplaceLabel(o),o.client,o.productName,o.productIdentifier,o.quantity,
+      fmtDate(o.labelCreatedDate),o.labelTrackingId,o.labelFileUrl,o.uspsTrackingNumber,o.status,o.deliveryStatus,o.intakeBy,
       fmtDateTime(o.createdAt),o.warehouseAckBy,fmtDateTime(o.warehouseAckAt),o.packedBy,fmtDateTime(o.packedAt),
       o.shippedBy,fmtDateTime(o.shippedAt),fmtDateTime(o.deliveredAt)]
       .map(v => `"${(v??'').toString().replace(/"/g,'""')}"`).join(',');
