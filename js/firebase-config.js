@@ -20,3 +20,12 @@ const firebaseConfig = {
   name/team assigned in the app's Admin panel. See README.md -> "Setting up
   your team" for the full walkthrough.
 */
+
+/*
+  File uploads (shipping-label PDFs, stock photos) use Cloudinary instead of
+  Firebase Storage -- it has a genuinely free tier with no credit card or
+  billing account required. See README.md -> "Set up Cloudinary" for the
+  2-minute signup + copy-paste values below.
+*/
+const CLOUDINARY_CLOUD_NAME = "qedyvjqu";
+const CLOUDINARY_UPLOAD_PRESET = "prepdeck-uploads";
