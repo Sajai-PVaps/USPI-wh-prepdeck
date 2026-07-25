@@ -12,7 +12,7 @@ be visible.
 
 | Team | What they do in the app |
 |---|---|
-| **Order Intake** | Clicks **+ New Order**, enters marketplace, client, delivery location, product, label creation date, and the label tracking ID |
+| **Order Intake** | Clicks **+ New Order**, picks the marketplace and product from a dropdown (adding new products to the catalog as needed), enters the label creation date and tracking ID, and uploads the shipping label PDF |
 | **Warehouse** | Works the **Warehouse Queue** board — acknowledges labels, marks items packed, adds the USPS tracking number when it ships — and logs incoming client stock in **Storage / Inventory** |
 | **Transactions** | Uses **Comms & Issues** to log WhatsApp updates, flag problem orders, mark orders Delivered, and follow orders through to resolution |
 | **Admin** | Everything above, plus the **Admin / Team** panel to add and remove teammates |
@@ -28,9 +28,15 @@ floor. You only need to do the setup below once.
 - **Firebase Authentication** (real per-person email/password logins) and
   **Firestore** (Google's free-tier real-time database) so all teams see the same
   data instantly, with server-side rules controlling exactly who can do what.
+- **Cloudinary** holds shipping-label PDFs and stock-verification photos — its
+  free tier needs no credit card or billing account, unlike Firebase Storage.
 - **GitHub Pages** hosts the site itself for free, straight from this repo.
 
-The free Firebase tier comfortably covers 100–500 orders/day with room to spare.
+The free Firebase tier comfortably covers 100–500 orders/day with room to
+spare; Cloudinary's free tier (roughly 25GB of storage/bandwidth per month)
+comfortably covers label PDFs and stock photos for a long time before you'd
+ever see a bill — and unlike Firebase Storage, it doesn't require upgrading
+to a paid billing plan just to use that free allowance.
 
 ---
 
@@ -99,6 +105,18 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow write: if isSignedIn() && (myTeam() == 'Warehouse' || isAdmin());
     }
+
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (myTeam() == 'Order Intake' || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+
+    match /clients/{clientId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (myTeam() == 'Order Intake' || isAdmin());
+      allow update, delete: if isAdmin();
+    }
   }
 }
 ```
@@ -106,13 +124,43 @@ service cloud.firestore {
 This is the **real** security layer — it's enforced on Google's servers, not in
 the app's code, so it can't be bypassed by a technically-savvy teammate poking
 around in their browser's dev tools. In plain terms: Order Intake can create
-orders but can't mark them Delivered; Warehouse can move orders through
-Acknowledged → Packed → Shipped and manage Storage; Transactions can mark orders
-Delivered or flag/resolve Exceptions; everyone can add notes; Admin can do
-everything, including managing the team member list. See **How the permissions
+orders and add products/clients to their catalogs but can't mark orders
+Delivered; Warehouse can move orders through Acknowledged → Packed → Shipped and
+manage Storage; Transactions can mark orders Delivered or flag/resolve
+Exceptions; everyone can add notes; Admin can do everything, including managing
+the team member list and removing catalog entries. See **How the permissions
 work** below for the full picture.
 
-### 4. Create your own Admin login
+### 4. Set up Cloudinary (for label PDFs and stock photos)
+
+File uploads use [Cloudinary](https://cloudinary.com) instead of Firebase
+Storage — it has a genuinely free tier (25 monthly credits, roughly 25GB of
+storage/bandwidth) that needs **no credit card and no billing account**,
+which sidesteps Firebase Storage's newer requirement to be on the paid Blaze
+plan even for free-tier usage.
+
+1. Go to [cloudinary.com](https://cloudinary.com) and click **Sign up for free**.
+   You can register with a Google account — no card required.
+2. Once you're in, your **Cloud name** is shown right on the dashboard home
+   page (top left area, under "Product Environment Credentials" or similar).
+   Copy it.
+3. In the left menu, go to **Settings** (gear icon) → **Upload** tab. Scroll
+   down to **Upload presets** and click **Add upload preset**.
+4. Set **Signing Mode** to **Unsigned** (this is what lets the app upload
+   directly from the browser with no backend server). Give it any name you'll
+   remember, e.g. `prepdeck-uploads`. Click **Save**.
+5. Open `js/firebase-config.js` and replace `PASTE_YOUR_CLOUDINARY_CLOUD_NAME`
+   with your Cloud name from step 2, and `PASTE_YOUR_UPLOAD_PRESET_NAME` with
+   the preset name you created in step 4. Save the file.
+
+That's it — no rules to publish, no billing to set up. The app already
+validates file type and size in the browser before uploading (PDF-only for
+labels, images-only for photos, with size caps), which covers the same
+protection Firebase Storage's rules would have given you. If you later want
+stricter server-side enforcement of those limits, Cloudinary's upload preset
+editor has its own optional format/size restriction settings you can turn on.
+
+### 5. Create your own Admin login
 
 1. Still in the Firebase console: **Authentication → Users tab → Add user**.
 2. Enter your own email (use the one you'll actually sign in with — lowercase) and set a password.
@@ -126,7 +174,7 @@ This one manual step bootstraps your first Admin account — after this, you can
 everyone else from inside the app itself (next section), no more Firestore console
 needed for new teammates.
 
-### 5. Put this project on GitHub
+### 6. Put this project on GitHub
 
 If you don't already have this in a repo:
 
@@ -143,7 +191,7 @@ git push -u origin main
 (Create the empty repo first at [github.com/new](https://github.com/new) — don't
 initialize it with a README there, since this project already has one.)
 
-### 6. Turn on GitHub Pages
+### 7. Turn on GitHub Pages
 
 1. On GitHub, open your repo → **Settings → Pages**.
 2. Under "Build and deployment", set **Source** to **Deploy from a branch**.
@@ -186,8 +234,12 @@ they've left the company).
 |---|:---:|:---:|:---:|:---:|
 | Create new orders | ✅ | — | — | ✅ |
 | Acknowledge label / mark packed / ship | — | ✅ | — | ✅ |
-| Manage Storage / Inventory | — | ✅ | — | ✅ |
+| Manage Storage / Inventory (incl. stock photos) | — | ✅ | — | ✅ |
 | Mark Delivered / flag or resolve Exception | — | — | ✅ | ✅ |
+| Add products to the catalog | ✅ | — | — | ✅ |
+| Remove products from the catalog | — | — | — | ✅ |
+| Add clients to the catalog | ✅ | — | — | ✅ |
+| Remove clients from the catalog | — | — | — | ✅ |
 | Add notes, WhatsApp logs, issue flags | ✅ | ✅ | ✅ | ✅ |
 | Manage team members | — | — | — | ✅ |
 
@@ -257,6 +309,19 @@ two-factor authentication, or account lockout policies beyond Firebase's
 defaults. All of those are realistic additions if your team grows or the data
 gets more sensitive — happy to build any of them when you need them.
 
+One more honest tradeoff: Cloudinary's "unsigned upload preset" (step 4 above)
+is, by design, usable by anyone who has your Cloud name and preset name — and
+like your Firebase config, those values are visible in the app's public source
+code, not secret. In practice this means a determined person could upload
+files to your Cloudinary account without going through Prep Deck's login at
+all. This doesn't expose any of your order/inventory data (Cloudinary only
+ever sees the files themselves, never your Firestore data), and the realistic
+worst case is someone using a slice of your free storage quota — but if that
+ever becomes a real concern, Cloudinary supports switching to "signed"
+uploads, which closes this gap at the cost of needing a small backend
+function to generate upload signatures. Worth doing if you ever handle
+genuinely sensitive files; not necessary for shipping labels and stock photos.
+
 ---
 
 ## Daily workflow
@@ -264,9 +329,12 @@ gets more sensitive — happy to build any of them when you need them.
 **Order Intake** receives order details + shipping label from a client →
 clicks **+ New Order** (or the orange **+** button on mobile) → fills in
 marketplace (Amazon FBM, Walmart, Etsy, eBay, Shopify, TikTok Shop, or Other),
-client, delivery location, product, the label's creation date, and its tracking
-ID → **Create Order**. It now shows as **Order Received** and appears instantly
-on the Warehouse Queue board.
+picks the **client** and **product** from their dropdowns (or clicks "add a
+client" / "add it to the catalog" right there if either isn't listed yet), the
+label's creation date, its tracking ID, and **uploads the shipping label as a
+PDF** → **Create Order**. It now shows as **Order Received** and appears
+instantly on the Warehouse Queue board, with the actual label file attached —
+no more hunting through a shared Drive folder to match a label to an order.
 
 **Warehouse** opens **Warehouse Queue**:
 - *Awaiting Label Ack* column → confirms the physical label matches → **Acknowledge Label**
@@ -275,10 +343,13 @@ on the Warehouse Queue board.
   USPS tracking number. Status flips to **Shipped** for everyone, instantly.
 
 Warehouse also owns **Storage / Inventory** — whenever a client ships product into
-the warehouse to hold, click **+ Log Stock Intake** and record the client,
-product, cartons/boxes received, date, and bin location. As stock gets used or
-shipped out, open that batch and **Apply Adjustment** with a negative number and
-a reason. Use **Mark Returned to Client** if a client asks for unused stock back.
+the warehouse to hold, click **+ Log Stock Intake**, pick the **client** from the
+same dropdown Order Intake uses, and record the product, cartons/boxes received,
+date, bin location, and optionally **photograph the incoming stock** right there
+for verification. As stock gets used or shipped out, open that batch and **Apply
+Adjustment** with a negative number and a reason. Use **Mark Returned to Client**
+if a client asks for unused stock back. More photos can be added to a batch at
+any time from its detail view.
 
 **Transactions** works from **Comms & Issues** and the **Dashboard**'s "Needs
 attention" list — orders stuck too long, or marked **Exception** — and logs
@@ -288,16 +359,24 @@ delivered, mark the order **Delivered** from its detail view.
 **Admin** manages who has access from **Admin / Team**, and can do anything any
 other team can do.
 
+**Products** and **Clients** are the shared catalogs behind the New Order and
+Storage Intake dropdowns. Order Intake and Admin can add a product (name + a
+unique ID — ASIN, UPC, SKU, whatever your team uses) or a client (just a name),
+so the same spelling gets typed once, correctly, and reused everywhere instead of
+retyped by hand on every order — which is what made matching shipping labels
+error-prone in the first place.
+
 **Dashboard** gives a same-day snapshot: received, awaiting ack, packed, shipped,
 delivered, and open exceptions, plus a storage snapshot — and a live "needs
 attention" list so nothing sits untouched for 24+ hours without someone noticing.
 
-**Reports** exports any date range / marketplace / client slice of orders to CSV,
-plus a one-click export of every storage batch on record.
+**Reports** exports any date range / marketplace / client slice of orders to CSV
+(including a link to each order's label PDF), plus a one-click export of every
+storage batch on record.
 
 Use the search bar at the top any time to jump straight to an order by its
-internal ref, delivery location, label tracking ID, or USPS tracking number — or
-to a storage batch by its batch reference or product ref.
+internal ref, label tracking ID, USPS tracking number, or product ID — or to a
+storage batch by its batch reference or product ref.
 
 **On mobile:** tap the ☰ icon top-left for navigation, and the orange floating
 **+** button (bottom-right) to start a new order from anywhere. This button only
@@ -310,11 +389,12 @@ a phone screen.
 ## Notes on the data model
 
 Every **order** carries: marketplace (with a free-text field when "Other" is
-picked), client, delivery location, product/quantity, priority, the label's
-creation date, its tracking ID, an optional link to the label file itself (paste
-a Google Drive/email link — this app doesn't store files), current status, USPS
-tracking number and delivery status, who did what and when at each stage, and a
-running notes/WhatsApp-log/issue-flag thread.
+picked), client, product name + product ID (a snapshot copied from the catalog at
+the moment the order was created — editing or deleting a catalog product later
+never rewrites past orders), quantity, the label's creation date, its tracking
+ID, the uploaded shipping label PDF, current status, USPS tracking number and
+delivery status, who did what and when at each stage, and a running
+notes/WhatsApp-log/issue-flag thread.
 
 Status always moves through: **Order Received → Label Acknowledged → Packed →
 Shipped → Delivered**, with **Exception** available at any point for anything
@@ -322,13 +402,23 @@ that goes wrong, and a one-click resolve path back into the flow.
 
 Every **storage batch** carries: client, product, an optional product ref/SKU,
 cartons received vs. cartons remaining, units per carton, date received,
-warehouse bin/location, condition, who logged it, a status (In Storage /
-Partially Shipped / Depleted / Returned to Client), and a full history of every
-quantity adjustment with who made it, when, and why. This is a stock
-**register**, not an automatic inventory system — adjusting a batch when stock is
-used doesn't happen by itself when an order ships; Warehouse logs it as a
-deliberate step. If you'd rather have order shipments automatically deduct from
-a linked storage batch, that's a bigger feature I can build when you're ready.
+warehouse bin/location, condition, any verification photos, who logged it, a
+status (In Storage / Partially Shipped / Depleted / Returned to Client), and a
+full history of every quantity adjustment with who made it, when, and why. This
+is a stock **register**, not an automatic inventory system — adjusting a batch
+when stock is used doesn't happen by itself when an order ships; Warehouse logs
+it as a deliberate step. If you'd rather have order shipments automatically
+deduct from a linked storage batch, that's a bigger feature I can build when
+you're ready.
+
+Every **product** in the catalog carries: name, a unique ID (ASIN/UPC/SKU/etc.),
+who added it, and when. Deleting a product only removes it from the dropdown
+going forward — it never touches past orders, since they keep their own copy of
+the name and ID.
+
+Every **client** in the catalog carries: name, who added it, and when. Same rule
+as products — deleting one only affects the dropdown going forward, since orders
+and storage batches each keep their own saved copy of the client name.
 
 Every **team member** record (visible only to Admins) carries: email, name, and
 team — this is what the Firestore rules check to decide what someone's allowed
