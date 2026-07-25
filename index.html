@@ -44,6 +44,8 @@
       <button class="nav-btn" data-view="orders"><span class="ico">📦</span>All Orders</button>
       <button class="nav-btn" data-view="warehouse"><span class="ico">🏷️</span>Warehouse Queue</button>
       <button class="nav-btn" data-view="storage"><span class="ico">🗄️</span>Storage / Inventory</button>
+      <button class="nav-btn" data-view="products"><span class="ico">📋</span>Products</button>
+      <button class="nav-btn" data-view="clients"><span class="ico">👥</span>Clients</button>
       <button class="nav-btn" data-view="comms"><span class="ico">💬</span>Comms &amp; Issues</button>
       <button class="nav-btn" data-view="reports"><span class="ico">📤</span>Reports / Export</button>
       <button class="nav-btn" data-view="admin" id="nav-admin" style="display:none;"><span class="ico">🛡️</span>Admin / Team</button>
@@ -65,7 +67,7 @@
       <h1 id="view-title">Dashboard</h1>
       <div class="search-wrap">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="global-search" placeholder="Search order ref, delivery location, or tracking">
+        <input type="text" id="global-search" placeholder="Search order ref, product, or tracking #">
       </div>
       <button class="btn-primary btn-accent" id="open-new-order"><span class="btn-full-label">+ New Order</span><span class="btn-short-label">+</span></button>
     </div>
@@ -119,7 +121,7 @@
         <div class="table-card">
           <table class="responsive-table">
             <thead><tr>
-              <th>Order Ref</th><th>Marketplace</th><th>Client</th><th>Delivery Location</th>
+              <th>Order Ref</th><th>Marketplace</th><th>Client</th>
               <th>Product</th><th>Label Created</th><th>Label Tracking</th><th>USPS Tracking</th><th>Status</th><th>Received</th>
             </tr></thead>
             <tbody id="orders-body"></tbody>
@@ -171,6 +173,44 @@
           <div class="empty-state" id="storage-empty" style="display:none;">
             <div class="big">No stock logged yet</div>
             <div>Click "+ Log Stock Intake" whenever a client ships product into the warehouse.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PRODUCT CATALOG -->
+      <div class="view" id="view-products">
+        <div class="filters">
+          <input type="text" id="pr-search" placeholder="Search by product name or ID...">
+          <span class="spacer"></span>
+          <button class="btn-primary btn-accent" id="open-new-product" style="padding:9px 14px;">+ Add Product</button>
+        </div>
+        <div class="table-card">
+          <table class="responsive-table">
+            <thead><tr><th>Product Name</th><th>Product ID (ASIN/UPC/etc.)</th><th>Added By</th><th>Date Added</th><th></th></tr></thead>
+            <tbody id="products-body"></tbody>
+          </table>
+          <div class="empty-state" id="products-empty" style="display:none;">
+            <div class="big">No products in the catalog yet</div>
+            <div>Click "+ Add Product" so it shows up in the New Order dropdown.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CLIENTS -->
+      <div class="view" id="view-clients">
+        <div class="filters">
+          <input type="text" id="cl-search" placeholder="Search clients...">
+          <span class="spacer"></span>
+          <button class="btn-primary btn-accent" id="open-new-client" style="padding:9px 14px;">+ Add Client</button>
+        </div>
+        <div class="table-card">
+          <table class="responsive-table">
+            <thead><tr><th>Client Name</th><th>Added By</th><th>Date Added</th><th></th></tr></thead>
+            <tbody id="clients-body"></tbody>
+          </table>
+          <div class="empty-state" id="clients-empty" style="display:none;">
+            <div class="big">No clients added yet</div>
+            <div>Click "+ Add Client" so it shows up in the New Order and Storage Intake dropdowns.</div>
           </div>
         </div>
       </div>
@@ -266,22 +306,68 @@
           <label>Specify Marketplace *</label>
           <input type="text" id="no-marketplace-other" placeholder="e.g. Shein, Faire, direct website">
         </div>
-        <div class="field"><label>Client *</label><input type="text" id="no-client" placeholder="Client / store name"></div>
-        <div class="field"><label>Delivery Location *</label><input type="text" id="no-delivery-location" placeholder="City, State (or full address)"></div>
-        <div class="field"><label>Priority</label>
-          <select id="no-priority"><option>Normal</option><option>Urgent</option></select>
+        <div class="field span2">
+          <label>Client * <span style="font-weight:400;text-transform:none;letter-spacing:0;"> — not listed? <a href="#" id="no-client-add-link">add a client</a></span></label>
+          <select id="no-client-select">
+            <option value="">Select a client...</option>
+          </select>
         </div>
-        <div class="field span2"><label>Product *</label><input type="text" id="no-product" placeholder="Product name"></div>
+        <div class="field span2">
+          <label>Product * <span id="no-product-add-wrap" style="font-weight:400;text-transform:none;letter-spacing:0;"> — not listed? <a href="#" id="no-product-add-link">add it to the catalog</a></span></label>
+          <select id="no-product-select">
+            <option value="">Select a product...</option>
+          </select>
+          <div id="no-product-id-hint" class="mono" style="font-size:11.5px;color:var(--text-dim);margin-top:4px;"></div>
+        </div>
         <div class="field"><label>Quantity</label><input type="number" id="no-qty" value="1" min="1"></div>
         <div class="field"><label>Label Creation Date *</label><input type="date" id="no-label-created-date"></div>
         <div class="field span2"><label>Shipping Label Tracking ID *</label><input type="text" id="no-label-tracking" placeholder="Tracking # printed on the label"></div>
-        <div class="field span2"><label>Label file link (Drive / email attachment URL)</label><input type="text" id="no-label-url" placeholder="https://..."></div>
+        <div class="field span2">
+          <label>Upload Shipping Label (PDF) *</label>
+          <input type="file" id="no-label-file" accept="application/pdf">
+          <div id="no-label-file-status" style="font-size:11.5px;color:var(--text-dim);margin-top:4px;"></div>
+        </div>
         <div class="field span2"><label>Notes for warehouse (optional)</label><textarea id="no-notes" placeholder="Special packaging instructions, fragile items, etc."></textarea></div>
       </div>
     </div>
     <div class="modal-footer">
       <button data-close="modal-new" style="border:1px solid var(--line);background:none;padding:9px 16px;border-radius:3px;">Cancel</button>
       <button class="btn-primary btn-accent" id="no-submit">Create Order</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADD PRODUCT MODAL -->
+<div class="overlay" id="modal-product">
+  <div class="modal">
+    <div class="modal-header"><h2>Add Product to Catalog</h2><button class="close-btn" data-close="modal-product">✕</button></div>
+    <div class="modal-body">
+      <div class="form-grid full">
+        <div class="field"><label>Product Name *</label><input type="text" id="pr-name" placeholder="e.g. Ceramic Coffee Mug, 12oz"></div>
+        <div class="field"><label>Product ID (ASIN / UPC / SKU / etc.) *</label><input type="text" id="pr-identifier" placeholder="e.g. B08XJKQ92L"></div>
+      </div>
+      <div id="pr-error" style="color:#C1443C;font-size:12px;margin-top:8px;"></div>
+    </div>
+    <div class="modal-footer">
+      <button data-close="modal-product" style="border:1px solid var(--line);background:none;padding:9px 16px;border-radius:3px;">Cancel</button>
+      <button class="btn-primary btn-accent" id="pr-submit">Add Product</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADD CLIENT MODAL -->
+<div class="overlay" id="modal-client">
+  <div class="modal">
+    <div class="modal-header"><h2>Add Client</h2><button class="close-btn" data-close="modal-client">✕</button></div>
+    <div class="modal-body">
+      <div class="form-grid full">
+        <div class="field"><label>Client Name *</label><input type="text" id="cl-name" placeholder="e.g. Bloom Studio"></div>
+      </div>
+      <div id="cl-error" style="color:#C1443C;font-size:12px;margin-top:8px;"></div>
+    </div>
+    <div class="modal-footer">
+      <button data-close="modal-client" style="border:1px solid var(--line);background:none;padding:9px 16px;border-radius:3px;">Cancel</button>
+      <button class="btn-primary btn-accent" id="cl-submit">Add Client</button>
     </div>
   </div>
 </div>
@@ -299,12 +385,12 @@
       <div class="detail-grid">
         <div><div class="k">Marketplace</div><div class="v" id="dt-marketplace">—</div></div>
         <div><div class="k">Client</div><div class="v" id="dt-client">—</div></div>
-        <div><div class="k">Delivery Location</div><div class="v" id="dt-delivery-location">—</div></div>
-        <div><div class="k">Priority</div><div class="v" id="dt-priority">—</div></div>
         <div><div class="k">Product / Qty</div><div class="v" id="dt-product">—</div></div>
+        <div><div class="k">Product ID</div><div class="v mono" id="dt-product-id">—</div></div>
         <div><div class="k">Label Created</div><div class="v mono" id="dt-label-created">—</div></div>
         <div><div class="k">Label Tracking ID</div><div class="v mono" id="dt-label-tracking">—</div></div>
         <div><div class="k">USPS Tracking</div><div class="v mono" id="dt-usps">—</div></div>
+        <div><div class="k">Shipping Label</div><div class="v" id="dt-label-file">—</div></div>
       </div>
 
       <div class="section-title" style="margin-top:6px;font-size:14px;">Status timeline</div>
@@ -337,7 +423,12 @@
     <div class="modal-header"><h2>Log Stock Intake</h2><button class="close-btn" data-close="modal-stock">✕</button></div>
     <div class="modal-body">
       <div class="form-grid">
-        <div class="field span2"><label>Client *</label><input type="text" id="st-client" placeholder="Client / store name"></div>
+        <div class="field span2">
+          <label>Client * <span style="font-weight:400;text-transform:none;letter-spacing:0;"> — not listed? <a href="#" id="st-client-add-link">add a client</a></span></label>
+          <select id="st-client-select">
+            <option value="">Select a client...</option>
+          </select>
+        </div>
         <div class="field span2"><label>Product *</label><input type="text" id="st-product" placeholder="Product name"></div>
         <div class="field"><label>Product Ref / SKU (optional)</label><input type="text" id="st-product-ref"></div>
         <div class="field"><label>Date Received *</label><input type="date" id="st-date-received"></div>
@@ -348,6 +439,11 @@
           <select id="st-condition"><option>Good</option><option>Partial / Some Damage</option><option>Damaged</option></select>
         </div>
         <div class="field span2"><label>Notes (optional)</label><textarea id="st-notes" placeholder="Anything the warehouse team should know"></textarea></div>
+        <div class="field span2">
+          <label>Photos of incoming stock (optional, for verification)</label>
+          <input type="file" id="st-photos" accept="image/*" multiple>
+          <div id="st-photos-status" style="font-size:11.5px;color:var(--text-dim);margin-top:4px;"></div>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -377,6 +473,13 @@
         <div><div class="k">Location / Bin</div><div class="v" id="sd-location">—</div></div>
         <div><div class="k">Condition</div><div class="v" id="sd-condition">—</div></div>
         <div><div class="k">Logged By</div><div class="v" id="sd-received-by">—</div></div>
+      </div>
+
+      <div class="section-title" style="font-size:14px;">Photos</div>
+      <div class="photo-grid" id="sd-photos"></div>
+      <div class="action-row">
+        <input type="file" id="sd-add-photos" accept="image/*" multiple style="max-width:260px;">
+        <button id="sd-upload-photos">Upload</button>
       </div>
 
       <div class="section-title" style="font-size:14px;">Adjust cartons</div>
